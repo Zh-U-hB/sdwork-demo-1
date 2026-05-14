@@ -1,0 +1,24 @@
+from pydantic import BaseModel, Field
+
+
+class Point3D(BaseModel):
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+
+
+class Dimensions(BaseModel):
+    length: float  # X-axis
+    width: float   # Y-axis
+    height: float  # Z-axis
+
+
+class Zone(BaseModel):
+    name: str = Field(description="Unique zone name, e.g. 'Living Room', 'Bedroom'")
+    origin: Point3D = Field(default_factory=Point3D, description="Origin point (x, y, z) in meters")
+    dimensions: Dimensions = Field(description="Dimensions (length, width, height) in meters")
+
+
+class BuildingModel(BaseModel):
+    building_name: str = Field(default="Unnamed Building")
+    zones: list[Zone] = Field(default_factory=list)
