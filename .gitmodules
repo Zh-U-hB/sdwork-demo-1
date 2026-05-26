@@ -1,0 +1,3 @@
+[submodule "plugins/energyplus_agent"]
+	path = plugins/energyplus_agent
+	url = https://github.com/ITOTI-Y/EnergyPlus-Agent
