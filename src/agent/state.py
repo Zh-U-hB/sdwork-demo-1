@@ -1,4 +1,4 @@
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
@@ -12,3 +12,6 @@ class AgentState(TypedDict):
     zones: list[Zone]
     building_description: str
     output_path: str
+    # EnergyPlus integration (optional — only populated when simulation is enabled)
+    idf_output_path: NotRequired[str]
+    simulation_result: NotRequired[str]

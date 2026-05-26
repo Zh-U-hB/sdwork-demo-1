@@ -37,6 +37,22 @@ def main():
         action="store_true",
         help="Run in interactive mode (chat with the agent)",
     )
+    parser.add_argument(
+        "--simulate", "-s",
+        action="store_true",
+        help=(
+            "After zone generation, pass the model to EnergyPlus-Agent for IDF "
+            "generation and simulation. Requires ENERGYPLUS_AGENT_PATH in .env."
+        ),
+    )
+    parser.add_argument(
+        "--idf-output",
+        default=None,
+        help=(
+            "Output path for the generated IDF file "
+            "(default: same as --output but with .idf extension)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -48,7 +64,10 @@ def main():
 
     print(f"Building: {args.name}")
     print(f"Description: {args.description}")
-    print(f"Output: {args.output}")
+    print(f"Output (JSON): {args.output}")
+    if args.simulate:
+        idf_path = args.idf_output or args.output.replace(".json", ".idf")
+        print(f"Output (IDF):  {idf_path}")
     print("-" * 50)
     print("Agent is working...")
 
@@ -56,6 +75,8 @@ def main():
         building_description=args.description,
         building_name=args.name,
         output_path=args.output,
+        idf_output_path=args.idf_output,
+        run_energyplus=args.simulate,
     ))
 
     # Print the final assistant message
@@ -70,7 +91,14 @@ def main():
                 if isinstance(item, dict) and item.get("type") == "text":
                     print(item["text"])
 
-    print(f"\nDone. Output saved to: {args.output}")
+    print(f"\nDone. Zone JSON saved to: {args.output}")
+    if args.simulate:
+        sim_result = result.get("simulation_result", "")
+        idf_path = result.get("idf_output_path", "")
+        if idf_path:
+            print(f"IDF saved to: {idf_path}")
+        if sim_result and "[EnergyPlus]" not in sim_result:
+            print(f"Simulation result: {sim_result}")
 
 
 if __name__ == "__main__":
