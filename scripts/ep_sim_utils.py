@@ -218,6 +218,15 @@ def parse_float(value: str) -> float:
         return 0.0
 
 
+def _is_number(s: str) -> bool:
+    """Return True if the string can be parsed as a float (including scientific notation)."""
+    try:
+        float(s)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def row_total_gj(row: list[str], start_index: int = 2) -> float:
     total = 0.0
     for value in row[start_index:]:
@@ -263,12 +272,18 @@ def read_eplustbl(result_dir: str) -> dict:
     zone_summary: list[dict] = []
     zone_energy: dict[str, dict[str, float]] = {}
 
+    current_report = ""   # tracks the most recently seen REPORT: header
     for i, row in enumerate(rows):
         if len(row) < 2:
             continue
 
         label = row[1].strip()
         section = row[0].strip()
+
+        # Update current report section whenever we see a REPORT: row
+        if section == "REPORT:":
+            current_report = label
+            continue
 
         if label in {"Total Site Energy", "Net Site Energy", "Total Source Energy", "Net Source Energy"}:
             site_energy[label] = parse_float(row[2]) if len(row) > 2 else 0.0
@@ -277,14 +292,13 @@ def read_eplustbl(result_dir: str) -> dict:
             building_area[label] = parse_float(row[2]) if len(row) > 2 else 0.0
 
         if label in {"Heating", "Cooling", "Interior Lighting", "Exterior Lighting", "Interior Equipment", "Fans", "Pumps"}:
-            nearby_title = ""
-            for back in range(max(0, i - 4), i):
-                if len(rows[back]) > 0 and rows[back][0].strip() == "REPORT:":
-                    nearby_title = rows[back][1].strip() if len(rows[back]) > 1 else ""
+            # Skip sub-category breakdown rows where row[2] is a text subcategory
+            if len(row) > 2 and not _is_number(row[2].strip()):
+                continue
             item = {"end_use": label, "total_gj": row_total_gj(row)}
-            if nearby_title == "Annual Building Utility Performance Summary":
+            if current_report == "Annual Building Utility Performance Summary":
                 end_uses.append(item)
-            elif nearby_title == "Demand End Use Components Summary":
+            elif current_report == "Demand End Use Components Summary":
                 demand_end_uses.append({"end_use": label, "demand_w": row_total_gj(row)})
 
         if label.startswith("ZONE_") and len(row) > 2:

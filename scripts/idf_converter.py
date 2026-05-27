@@ -580,10 +580,16 @@ def convert_and_run(
             template_thermostat_name=defaults.hvac.thermostat_name,
         ))
 
-    # ── Save IDF ──────────────────────────────────────────────────────────────
+    # ── Save IDF + model JSON (for viewer) ────────────────────────────────────
+    import json as _json
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     idf_path = output_dir / f"building_{timestamp}.idf"
     idf.save(idf_path)
+    # Save original model dict alongside IDF so sim_viewer_app can pick it up
+    model_json_path = output_dir / "model.json"
+    model_json_path.write_text(
+        _json.dumps(model_dict, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     print(f"[idf_converter] IDF saved → {idf_path}  ({len(raw_zones)} zones, {len(shared_pairs)} shared-wall pairs)")
 
     if not run_simulation:
