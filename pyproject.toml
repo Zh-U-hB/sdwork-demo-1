@@ -10,8 +10,10 @@ dependencies = [
     "langgraph>=0.2.0",
     "langchain-mcp-adapters>=0.1.0",
     "pydantic>=2.0.0",
+    "plotly>=5.0.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
+    "streamlit>=1.30.0",
     # UI (optional — required only when running app.py)
     # streamlit>=1.40.0
     # plotly>=5.0.0
