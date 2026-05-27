@@ -18,6 +18,8 @@ dependencies = [
     # streamlit>=1.40.0
     # plotly>=5.0.0
     "httpx[socks]>=0.28.1",
+    "eppy>=0.5.69",
+    "idfpy>=26.1.0.post5",
 ]
 
 [tool.hatch.build.targets.wheel]
