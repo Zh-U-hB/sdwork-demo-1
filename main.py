@@ -7,6 +7,7 @@ Usage:
 
 import argparse
 import asyncio
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -66,7 +67,7 @@ def main():
     print(f"Description: {args.description}")
     print(f"Output (JSON): {args.output}")
     if args.simulate:
-        idf_path = args.idf_output or args.output.replace(".json", ".idf")
+        idf_path = args.idf_output or str(Path(args.output).with_suffix(".idf"))
         print(f"Output (IDF):  {idf_path}")
     print("-" * 50)
     print("Agent is working...")

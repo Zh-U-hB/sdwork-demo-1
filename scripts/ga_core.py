@@ -94,7 +94,10 @@ def _params_hash(params: dict) -> str:
 def _load_cache(path: str) -> dict[str, float]:
     p = Path(path)
     if p.exists():
-        return json.loads(p.read_text())
+        try:
+            return json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
     return {}
 
 
@@ -179,7 +182,7 @@ def evaluate_fitness(
     # Try to generate model
     try:
         model = generate_l_gradient(**full_params)
-    except (ValueError, Exception):
+    except Exception:
         cache[key] = PENALTY
         return PENALTY, None
 
@@ -261,7 +264,7 @@ def run_ga(
     for i, ind in enumerate(population):
         fit, model = evaluate_fitness(ind, cache)
         fitness[i] = fit
-        if model is not None:
+        if fit < PENALTY and model is not None:
             best_model = model
 
     _save_cache(cache, config.cache_path)
@@ -303,10 +306,12 @@ def run_ga(
         population = new_pop
         fitness = [PENALTY] * config.pop_size
         best_model = None
+        best_gen_fitness = PENALTY
         for i, ind in enumerate(population):
             fit, model = evaluate_fitness(ind, cache)
             fitness[i] = fit
-            if model is not None:
+            if fit < best_gen_fitness and model is not None:
+                best_gen_fitness = fit
                 best_model = model
 
         _save_cache(cache, config.cache_path)

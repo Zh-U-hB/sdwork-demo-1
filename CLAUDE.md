@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-LLM-driven agent that converts natural language building descriptions into 3D zone geometry (JSON for Rhino/Grasshopper) with optional EnergyPlus energy simulation. Also includes a parametric L-shaped building generator with interactive tuning UI. Built with LangChain/LangGraph, Pydantic v2, Python >=3.12. Uses `uv` for dependency management.
+LLM-driven agent that converts natural language building descriptions into 3D zone geometry (JSON for Rhino/Grasshopper) with optional EnergyPlus energy simulation. Also includes a parametric L-shaped building generator with interactive tuning UI and a genetic algorithm optimizer. Built with LangChain/LangGraph, Pydantic v2, Python >=3.12. Uses `uv` for dependency management.
 
 ## Common Commands
 
@@ -15,6 +15,7 @@ python main.py -d "A house with 3 rooms"   # CLI batch mode (LLM pipeline)
 python main.py -d "..." --simulate         # CLI with EnergyPlus simulation
 streamlit run app.py                       # Interactive chat UI with 3D preview
 streamlit run parametric_l_app.py          # Parametric L-shape tuning UI with energy analysis
+streamlit run ga_optimizer_app.py          # GA energy optimizer UI
 python scripts/generate_l_gradient.py      # Generate parametric L-shape model (standalone)
 bash scripts/setup_plugin.sh               # First-time EnergyPlus plugin setup
 ```
@@ -48,30 +49,90 @@ Pydantic models: `Point3D`, `Dimensions`, `Zone`, `BuildingModel`.
 
 `LLMConfig` reads from env vars. `init_chat_model()` uses `provider:model_name` format (e.g., `anthropic:claude-sonnet-4-6`).
 
-## EnergyPlus Plugin
+## Two Simulation Paths
 
-Git submodule at `plugins/energyplus_agent/`. Communicates via MCP protocol (langchain-mcp-adapters). Requires EnergyPlus 25.1.0+ installed locally. Setup: `bash scripts/setup_plugin.sh`.
+Both produce the same end result (eplustbl.csv with energy data), but differ in speed and reliability:
 
-## Two Generation Paths
+### Direct Path (preferred — fast, deterministic, no LLM)
 
-The project supports two complementary workflows for creating building zone geometry, both producing the same `BuildingModel` JSON format:
+```
+model_dict → scripts/idf_converter.convert_and_run() → IDF file → energyplus subprocess → eplustbl.csv
+```
+
+Uses **idfpy** (type-safe Pydantic models for IDF objects, no IDD file needed). Entry point: `scripts/idf_converter.py`. Default parameters in `scripts/idf_defaults.py`. Called by GA optimizer and `run_ep_simulation_direct()` in `ep_sim_utils.py`.
+
+### MCP Path (original — slow, LLM-driven)
+
+```
+model_dict → MCP Agent (LLM) → 13 IDF construction steps → energyplus → eplustbl.csv
+```
+
+Uses the EnergyPlus Agent plugin at `plugins/energyplus_agent/`. Each simulation takes 2-5 minutes due to LLM step-by-step IDF construction. Kept for backward compatibility via `run_ep_simulation()` in `ep_sim_utils.py`.
+
+### When to use which
+
+- GA optimizer (`ga_core.py`) and any batch evaluation: **direct path only** (speed critical)
+- `main.py --simulate` and `app.py`: still uses **MCP path** (can be migrated later)
+- `parametric_l_app.py`: reads pre-existing `eplustbl.csv`, no simulation path preference
+
+## Direct IDF Converter (`scripts/idf_converter.py`)
+
+Converts BuildingModel JSON → EnergyPlus IDF using idfpy. Process:
+
+1. Filter zones (skip height < 1.0m markers)
+2. Sanitize zone names to ASCII (`Zone_01`, `Zone_02`, ...)
+3. Detect shared walls between adjacent zones (X/Y axis, tolerance 0.01m)
+4. Build IDF: Version → SimulationControl → Timestep → RunPeriod → GlobalGeometryRules → Building → Location → Materials → Constructions → Schedules → Thermostat → Zones + 6 surfaces each → Patch shared walls → People + Lights + IdealLoadsAirSystem per zone
+5. Save IDF → run `energyplus` subprocess
+
+Vertex ordering: UpperLeftCorner + CounterClockwise + World coordinate system (matches GlobalGeometryRules).
+
+Defaults are fully configurable via `scripts/idf_defaults.py` dataclasses. Override example:
+```python
+defaults = make_default_settings()
+defaults.location.latitude = 39.93
+defaults.window.wwr = 0.4
+result = convert_and_run(model, defaults=defaults)
+```
+
+**Note**: idfpy is generated from EnergyPlus 26.1 schema but the system runs EP 25.1. Some EP 26.1 new fields (e.g., `OutputControlTableStyle.format_numeric_values`) must be skipped in the converter.
+
+## Three Generation Paths
 
 1. **LLM Pipeline** — Natural language → `intake` → `zone_agent` (ReAct) → `export` → JSON. Used by `main.py` and `app.py`.
 2. **Parametric Generation** — Mathematical parameters → `generate_l_gradient()` → JSON. Used by `scripts/generate_l_gradient.py` and `parametric_l_app.py`.
+3. **GA Optimization** — Genetic algorithm searches parameter space → `generate_l_gradient()` → direct IDF → EP simulation → minimize EUI. Used by `ga_optimizer_app.py`.
 
-Both paths can feed into the EnergyPlus simulation node.
+All three produce the same `BuildingModel` JSON format and can feed into either simulation path.
+
+## GA Optimizer (`scripts/ga_core.py` + `ga_optimizer_app.py`)
+
+Minimizes EUI (MJ/m²) by searching 12 parameters of `generate_l_gradient()`: floors, lobby_height, floor_height, base_x/y, arm_width, horizontal/vertical_length, scatter_gap, min_fragment_scale, merge_power, top_solid_floors. Uses tournament selection + BLX-α crossover + Gaussian mutation with elitism. Results cached to `output/ga_cache.json`, checkpoints to `output/ga_checkpoint.json`. Constraint: building height < 50m.
 
 ## Entry Points
 
 - **`main.py`** — CLI with argparse; calls `run_agent()` async
 - **`app.py`** — Streamlit multi-turn chat UI with Plotly 3D zone preview
-- **`parametric_l_app.py`** — Streamlit parametric tuning UI; two tabs: geometric preview (sliders for L-shape params) and energy analysis (reads `eplustbl.csv`, maps energy data to zones)
-- **`scripts/generate_l_gradient.py`** — Standalone script for parametric L-shaped building generation
+- **`parametric_l_app.py`** — Streamlit parametric tuning UI; geometric preview tab + energy analysis tab
+- **`ga_optimizer_app.py`** — Streamlit GA optimization UI; evolution progress + best solution + population comparison
+- **`scripts/generate_l_gradient.py`** — Standalone parametric L-shaped building generator
 
-## Parametric L-Shape Generator (`scripts/generate_l_gradient.py`)
+## EnergyPlus Plugin
 
-Generates a gradient L-shaped office building that transitions from fragmented lower floors to a solid L-form at the top. Core parameters: `floors`, `arm_width`, `horizontal_length`, `vertical_length`, `scatter_gap`, `merge_power`, `bridge_start_floor`, `top_solid_floors`. Output is a `BuildingModel` JSON with ~76 zones for default settings.
+Git submodule at `plugins/energyplus_agent/`. Communicates via MCP protocol (langchain-mcp-adapters). Requires EnergyPlus 25.1.0+ installed locally (`/usr/local/EnergyPlus-25-1-0/`). Setup: `bash scripts/setup_plugin.sh`. The plugin's converter modules (`src/converters/`) serve as reference for the direct converter's field names and patterns.
 
 ## Output
 
-JSON files written to `output/`: `{ building_name, zones: [{ name, origin: {x,y,z}, dimensions: {length,width,height} }] }`. IDF files generated when `--simulate` is used.
+JSON files written to `output/`: `{ building_name, zones: [{ name, origin: {x,y,z}, dimensions: {length,width,height} }] }`. Simulation results: `output/direct_energyplus/` or `output/ga_*` containing IDF files and `eplustbl.csv`.
+
+## Key Dependencies
+
+- **idfpy** — Pydantic v2 models for 859 EnergyPlus IDF object types, used by direct converter
+- **eppy** — Legacy IDF manipulation, used by EP Agent plugin (not the direct converter)
+- **langchain/langgraph** — LLM orchestration for the natural language pipeline
+- **pydantic >=2** — Data validation throughout
+- **streamlit + plotly** — All UI pages
+
+## IDF Library Preference
+
+Use **idfpy** (not eppy) for any new IDF manipulation code. idfpy provides type-safe Pydantic models, requires no IDD file, and has built-in simulation execution. See `scripts/idf_converter.py` for usage patterns.

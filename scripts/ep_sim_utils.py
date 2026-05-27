@@ -282,7 +282,7 @@ def read_eplustbl(result_dir: str) -> dict:
                 if len(rows[back]) > 0 and rows[back][0].strip() == "REPORT:":
                     nearby_title = rows[back][1].strip() if len(rows[back]) > 1 else ""
             item = {"end_use": label, "total_gj": row_total_gj(row)}
-            if nearby_title == "Annual Building Utility Performance Summary" or i < 100:
+            if nearby_title == "Annual Building Utility Performance Summary":
                 end_uses.append(item)
             elif nearby_title == "Demand End Use Components Summary":
                 demand_end_uses.append({"end_use": label, "demand_w": row_total_gj(row)})

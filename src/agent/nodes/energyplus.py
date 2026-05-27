@@ -22,7 +22,6 @@ Other optional env vars:
 """
 
 import os
-import sys
 from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage
@@ -95,7 +94,10 @@ def _get_mcp_server_config() -> dict | None:
                     ),
                 ],
                 "transport": "stdio",
-                "env": {**os.environ},
+                "env": {
+                    k: v for k, v in os.environ.items()
+                    if not k.startswith(("LLM_API_KEY", "OPENAI_", "ANTHROPIC_"))
+                },
             }
         }
 
@@ -275,12 +277,18 @@ def _build_task_prompt(
     idf_output_path: str,
     weather_file: str,
 ) -> str:
+    def _env_float(key: str, default: str) -> float:
+        try:
+            return float(os.getenv(key, default))
+        except (ValueError, TypeError):
+            return float(default)
+
     location = {
         "name":      os.getenv("ENERGYPLUS_LOCATION_NAME", "Shenzhen"),
-        "latitude":  float(os.getenv("ENERGYPLUS_LATITUDE",  "22.55")),
-        "longitude": float(os.getenv("ENERGYPLUS_LONGITUDE", "114.10")),
-        "timezone":  float(os.getenv("ENERGYPLUS_TIMEZONE",  "8")),
-        "elevation": float(os.getenv("ENERGYPLUS_ELEVATION", "5")),
+        "latitude":  _env_float("ENERGYPLUS_LATITUDE",  "22.55"),
+        "longitude": _env_float("ENERGYPLUS_LONGITUDE", "114.10"),
+        "timezone":  _env_float("ENERGYPLUS_TIMEZONE",  "8"),
+        "elevation": _env_float("ENERGYPLUS_ELEVATION", "5"),
     }
 
     # Build a zone name mapping: Chinese/Unicode → ASCII-safe names for EnergyPlus

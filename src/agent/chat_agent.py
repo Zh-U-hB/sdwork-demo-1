@@ -4,7 +4,7 @@ from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.language_models import BaseChatModel
 
-from src.agent.tools import ZONE_TOOLS, reset_store, get_zones, set_building_name, export_json
+from src.agent.tools import ZONE_TOOLS, reset_store, get_zones, set_building_name
 
 CHAT_SYSTEM_PROMPT = """You are an architectural 3D modeling assistant. You help users create and refine building models through conversation.
 

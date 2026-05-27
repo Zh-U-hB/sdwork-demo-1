@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import HumanMessage
@@ -11,14 +12,6 @@ from src.agent.nodes.export import export_node
 from src.agent.nodes.energyplus import energyplus_node
 from src.agent.tools import reset_store, set_building_name, get_zones
 from src.agent.llm import create_llm
-
-
-def _energyplus_configured() -> bool:
-    """Return True if at least one EnergyPlus transport config is present."""
-    transport = os.getenv("ENERGYPLUS_AGENT_TRANSPORT", "stdio").lower()
-    if transport == "stdio":
-        return bool(os.getenv("ENERGYPLUS_AGENT_PATH", "").strip())
-    return bool(os.getenv("ENERGYPLUS_AGENT_URL", "").strip())
 
 
 def build_graph(run_energyplus: bool = False):
@@ -96,7 +89,6 @@ async def run_agent(
     """
     graph = build_graph(run_energyplus=run_energyplus)
 
-    from pathlib import Path
     resolved_idf = idf_output_path or str(Path(output_path).with_suffix(".idf"))
 
     initial_state: AgentState = {

@@ -1,6 +1,7 @@
 """Streamlit UI for the 3D Architectural Modeling Agent — multi-turn chat mode."""
 
 import asyncio
+import concurrent.futures
 
 import plotly.graph_objects as go
 import streamlit as st
@@ -72,11 +73,22 @@ def render_preview(zones):
 
 
 def run_agent_sync(user_input: str, history: list[dict], output_path: str):
-    """Synchronous wrapper for async chat_turn with conversation history."""
-    return asyncio.run(chat_turn(
+    """Synchronous wrapper for async chat_turn — works in Streamlit."""
+    coro = chat_turn(
         st.session_state.agent, user_input,
         history=history, output_path=output_path,
-    ))
+    )
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
+    else:
+        return asyncio.run(coro)
 
 
 def reset_all():

@@ -18,9 +18,7 @@ from scripts.ga_core import (
     save_checkpoint,
 )
 from scripts.generate_l_gradient import generate_l_gradient
-
-# Reuse visualization from parametric_l_app
-from parametric_l_app import (
+from scripts.vis_utils import (
     box_vertices,
     box_edges,
     model_metrics,
@@ -55,8 +53,11 @@ if "ga_total_evals" not in st.session_state:
 
 
 def _reset_state():
-    for key in ("ga_history", "ga_best", "ga_best_fitness", "ga_best_model", "ga_total_evals"):
-        st.session_state[key] = [] if key == "ga_history" else None if key != "ga_total_evals" else 0
+    st.session_state.ga_history = []
+    st.session_state.ga_best = None
+    st.session_state.ga_best_fitness = None
+    st.session_state.ga_best_model = None
+    st.session_state.ga_total_evals = 0
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +101,7 @@ with st.sidebar:
             best_h = min(ckpt.history, key=lambda h: h.get("best_fitness", 1e6)) if ckpt.history else None
             if best_h:
                 st.session_state.ga_best = best_h.get("best_params")
+                st.session_state.ga_best_model = None  # will regenerate from params
             st.success(f"已恢复到第 {ckpt.generation} 代")
             st.rerun()
         else:

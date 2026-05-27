@@ -16,7 +16,7 @@ def reset_store() -> None:
 
 
 def get_zones() -> list[Zone]:
-    return _zones
+    return list(_zones)
 
 
 def set_building_name(name: str) -> None:
@@ -37,6 +37,9 @@ def create_zone(
     """Create a new building zone with its 3D geometry. All dimensions in meters.
     origin_x/y/z define the lower-left corner, length is along X-axis, width along Y-axis, height along Z-axis.
     Returns the created zone info as JSON."""
+    if length <= 0 or width <= 0 or height <= 0:
+        return f"Error: Dimensions must be positive (got length={length}, width={width}, height={height})"
+
     existing = {z.name for z in _zones}
     if name in existing:
         return f"Error: Zone '{name}' already exists. Use update_zone to modify or delete_zone to remove it first."
@@ -71,21 +74,26 @@ def update_zone(
 ) -> str:
     """Update an existing zone's geometry. Only specify the fields you want to change.
     Returns the updated zone info as JSON."""
-    for zone in _zones:
+    for i, zone in enumerate(_zones):
         if zone.name == name:
-            if origin_x is not None:
-                zone.origin.x = origin_x
-            if origin_y is not None:
-                zone.origin.y = origin_y
-            if origin_z is not None:
-                zone.origin.z = origin_z
-            if length is not None:
-                zone.dimensions.length = length
-            if width is not None:
-                zone.dimensions.width = width
-            if height is not None:
-                zone.dimensions.height = height
-            return f"Updated: {zone.model_dump_json()}"
+            updates = {}
+            if origin_x is not None or origin_y is not None or origin_z is not None:
+                updates["origin"] = Point3D(
+                    x=origin_x if origin_x is not None else zone.origin.x,
+                    y=origin_y if origin_y is not None else zone.origin.y,
+                    z=origin_z if origin_z is not None else zone.origin.z,
+                )
+            if length is not None or width is not None or height is not None:
+                new_length = length if length is not None else zone.dimensions.length
+                new_width = width if width is not None else zone.dimensions.width
+                new_height = height if height is not None else zone.dimensions.height
+                if new_length <= 0 or new_width <= 0 or new_height <= 0:
+                    return f"Error: Dimensions must be positive (got length={new_length}, width={new_width}, height={new_height})"
+                updates["dimensions"] = Dimensions(length=new_length, width=new_width, height=new_height)
+            if updates:
+                _zones[i] = zone.model_copy(update=updates)
+                return f"Updated: {_zones[i].model_dump_json()}"
+            return f"No changes: {zone.model_dump_json()}"
     return f"Error: Zone '{name}' not found. Available zones: {[z.name for z in _zones]}"
 
 

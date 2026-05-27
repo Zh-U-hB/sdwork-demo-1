@@ -3,15 +3,14 @@ from pathlib import Path
 from langchain_core.messages import AIMessage
 
 from src.agent.state import AgentState
-from src.agent.tools import get_zones, set_building_name
+from src.agent.tools import get_zones
 from src.models.zone import BuildingModel
 
 
 def export_node(state: AgentState) -> dict:
     """Export zones to JSON file and return the result."""
-    zones = get_zones()
+    zones = state.get("zones") or get_zones()
     building_name = state.get("building_name", "Unnamed Building")
-    set_building_name(building_name)
 
     output_path = state.get("output_path", "output/building.json")
     model = BuildingModel(building_name=building_name, zones=zones)

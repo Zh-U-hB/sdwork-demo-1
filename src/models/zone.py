@@ -8,9 +8,9 @@ class Point3D(BaseModel):
 
 
 class Dimensions(BaseModel):
-    length: float  # X-axis
-    width: float   # Y-axis
-    height: float  # Z-axis
+    length: float = Field(gt=0, description="X-axis dimension in meters")
+    width: float = Field(gt=0, description="Y-axis dimension in meters")
+    height: float = Field(gt=0, description="Z-axis dimension in meters")
 
 
 class Zone(BaseModel):

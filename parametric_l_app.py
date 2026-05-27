@@ -15,6 +15,22 @@ from scripts.ep_sim_utils import (
     run_ep_simulation,
 )
 from scripts.generate_bridge_cluster import generate_bridge_cluster, gross_area
+from scripts.llm_optimizer import (
+    ALL_TUNABLE,
+    BRIDGE_CLUSTER_TUNABLE,
+    best_record,
+    run_llm_optimization,
+)
+from scripts.vis_utils import (
+    box_vertices,
+    box_edges,
+    model_metrics,
+    render_model,
+    render_end_use_chart,
+    render_end_use_pie,
+    render_zone_energy_chart,
+    save_json,
+)
 
 
 DEFAULTS = {
@@ -51,247 +67,14 @@ DEFAULTS = {
 }
 
 # ---------------------------------------------------------------------------
-# Session state for simulation results
+# Session state for simulation results and LLM optimizer
 # ---------------------------------------------------------------------------
 if "ep_result_dir" not in st.session_state:
     st.session_state.ep_result_dir = None
-
-
-def box_vertices(zone: dict) -> tuple[list[float], list[float], list[float]]:
-    if "points" in zone:
-        points = zone["points"]
-        return (
-            [point["x"] for point in points],
-            [point["y"] for point in points],
-            [point["z"] for point in points],
-        )
-
-    origin = zone["origin"]
-    dims = zone["dimensions"]
-    ox, oy, oz = origin["x"], origin["y"], origin["z"]
-    length, width, height = dims["length"], dims["width"], dims["height"]
-    vertices = [
-        (ox, oy, oz),
-        (ox + length, oy, oz),
-        (ox + length, oy + width, oz),
-        (ox, oy + width, oz),
-        (ox, oy, oz + height),
-        (ox + length, oy, oz + height),
-        (ox + length, oy + width, oz + height),
-        (ox, oy + width, oz + height),
-    ]
-    x, y, z = zip(*vertices)
-    return list(x), list(y), list(z)
-
-
-def box_edges(zone: dict) -> tuple[list[float], list[float], list[float]]:
-    x, y, z = box_vertices(zone)
-    edges = [
-        (0, 1), (1, 2), (2, 3), (3, 0),
-        (4, 5), (5, 6), (6, 7), (7, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
-    ]
-    ex, ey, ez = [], [], []
-    for start, end in edges:
-        ex.extend([x[start], x[end], None])
-        ey.extend([y[start], y[end], None])
-        ez.extend([z[start], z[end], None])
-    return ex, ey, ez
-
-
-def zone_floor_index(name: str) -> int:
-    if len(name) >= 3 and name[0] == "F" and name[1:3].isdigit():
-        return int(name[1:3])
-    return 0
-
-
-def model_metrics(model: dict) -> dict:
-    zones = model["zones"]
-    mass_zones = [
-        z for z in zones
-        if z["dimensions"]["height"] > MASS_HEIGHT_THRESHOLD and z.get("category") != "open_space_reference"
-    ]
-    area = gross_area(model)
-    max_height = max(
-        z["origin"]["z"] + z["dimensions"]["height"]
-        for z in mass_zones
-    ) if mass_zones else 0.0
-    return {
-        "area": area,
-        "height": max_height,
-        "zone_count": len(zones),
-        "mass_zone_count": len(mass_zones),
-    }
-
-
-def render_model(
-    model: dict,
-    site_size: float,
-    show_edges: bool,
-    opacity: float,
-    zone_energy: dict[str, dict[str, float]] | None = None,
-    energy_metric: str = "total_gj",
-) -> go.Figure:
-    fig = go.Figure()
-    zones = model["zones"]
-    values = [
-        metrics.get(energy_metric, 0.0)
-        for metrics in (zone_energy or {}).values()
-    ]
-    cmax = max(values) if values else 0.0
-    cmin = 0.0
-    has_energy = bool(zone_energy) and cmax > 0
-    colorbar_shown = False
-
-    for zone in zones:
-        is_reference = zone.get("category") == "open_space_reference" or zone["name"] == "site_inner_courtyard_reference"
-        x, y, z = box_vertices(zone)
-        floor_index = zone_floor_index(zone["name"])
-        category = zone.get("category", "")
-        color = "#94A3B8" if is_reference else "#2563EB"
-        if category == "platform":
-            color = "#F97316"
-        elif floor_index >= 9:
-            color = "#D97706"
-        elif floor_index >= 5:
-            color = "#059669"
-
-        energy = (zone_energy or {}).get(zone["name"], {})
-        value = energy.get(energy_metric, 0.0)
-        hover = (
-            f"<b>{zone['name']}</b><br>"
-            f"origin: ({zone['origin']['x']}, {zone['origin']['y']}, {zone['origin']['z']})<br>"
-            f"{zone['dimensions']['length']} x {zone['dimensions']['width']} x {zone['dimensions']['height']} m"
-        )
-        if energy:
-            hover += (
-                f"<br>total: {energy.get('total_gj', 0):.2f} GJ"
-                f"<br>heating: {energy.get('heating_gj', 0):.2f} GJ"
-                f"<br>cooling: {energy.get('cooling_gj', 0):.2f} GJ"
-                f"<br>lighting: {energy.get('lighting_gj', 0):.2f} GJ"
-                f"<br>source: {energy.get('source', 'meter')}"
-            )
-
-        mesh_kwargs = dict(
-            x=x,
-            y=y,
-            z=z,
-            i=[0, 0, 0, 1, 2, 4, 5, 6, 4, 7, 3, 0],
-            j=[1, 2, 4, 5, 3, 5, 6, 7, 7, 6, 7, 3],
-            k=[2, 3, 5, 4, 7, 6, 1, 2, 0, 2, 0, 4],
-            opacity=0.28 if is_reference else opacity,
-            name=zone["name"],
-            hovertemplate=hover + "<extra></extra>",
-        )
-        if has_energy and not is_reference:
-            mesh_kwargs.update(
-                intensity=[value] * 8,
-                colorscale="Turbo",
-                cmin=cmin,
-                cmax=cmax,
-                showscale=not colorbar_shown,
-                colorbar=dict(title=f"{energy_metric} GJ"),
-            )
-            colorbar_shown = True
-        else:
-            mesh_kwargs.update(color=color, showscale=False)
-
-        fig.add_trace(go.Mesh3d(**mesh_kwargs))
-
-        if show_edges:
-            ex, ey, ez = box_edges(zone)
-            fig.add_trace(go.Scatter3d(
-                x=ex,
-                y=ey,
-                z=ez,
-                mode="lines",
-                line=dict(color="#111827" if not is_reference else "#64748B", width=2),
-                hoverinfo="skip",
-                showlegend=False,
-            ))
-
-    fig.add_trace(go.Scatter3d(
-        x=[0, site_size, site_size, 0, 0],
-        y=[0, 0, site_size, site_size, 0],
-        z=[0, 0, 0, 0, 0],
-        mode="lines",
-        line=dict(color="#DC2626", width=5),
-        name="100m site boundary",
-        hoverinfo="skip",
-    ))
-
-    fig.update_layout(
-        height=720,
-        margin=dict(l=0, r=0, t=10, b=0),
-        scene=dict(
-            xaxis=dict(title="X (m)", range=[0, site_size], backgroundcolor="#F8FAFC"),
-            yaxis=dict(title="Y (m)", range=[0, site_size], backgroundcolor="#F8FAFC"),
-            zaxis=dict(title="Z (m)", range=[0, 50], backgroundcolor="#F8FAFC"),
-            aspectmode="manual",
-            aspectratio=dict(x=1, y=1, z=0.55),
-            camera=dict(eye=dict(x=1.45, y=-1.6, z=1.05)),
-        ),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    )
-    return fig
-
-
-def render_end_use_chart(end_uses: list[dict]) -> go.Figure:
-    fig = go.Figure(go.Bar(
-        x=[item["end_use"] for item in end_uses],
-        y=[item["total_gj"] for item in end_uses],
-        marker_color=["#DC2626", "#2563EB", "#F59E0B", "#6B7280", "#7C3AED", "#059669", "#0F766E"][:len(end_uses)],
-        hovertemplate="<b>%{x}</b><br>%{y:.2f} GJ<extra></extra>",
-    ))
-    fig.update_layout(
-        height=320,
-        margin=dict(l=0, r=0, t=10, b=0),
-        yaxis_title="Annual Energy (GJ)",
-        xaxis_title="",
-    )
-    return fig
-
-
-def render_end_use_pie(end_uses: list[dict]) -> go.Figure:
-    fig = go.Figure(go.Pie(
-        labels=[item["end_use"] for item in end_uses],
-        values=[item["total_gj"] for item in end_uses],
-        hole=0.45,
-        hovertemplate="<b>%{label}</b><br>%{value:.2f} GJ<br>%{percent}<extra></extra>",
-    ))
-    fig.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0))
-    return fig
-
-
-def render_zone_energy_chart(zone_rows: list[dict]) -> go.Figure:
-    fig = go.Figure()
-    for key, label, color in [
-        ("heating_gj", "Heating", "#DC2626"),
-        ("cooling_gj", "Cooling", "#2563EB"),
-        ("lighting_gj", "Lighting", "#F59E0B"),
-    ]:
-        fig.add_trace(go.Bar(
-            x=[row["model_zone"] for row in zone_rows],
-            y=[row[key] for row in zone_rows],
-            name=label,
-            marker_color=color,
-            hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.2f}} GJ<extra></extra>",
-        ))
-    fig.update_layout(
-        barmode="stack",
-        height=360,
-        margin=dict(l=0, r=0, t=10, b=0),
-        yaxis_title="Annual Energy (GJ)",
-        xaxis_title="",
-    )
-    return fig
-
-
-def save_json(model: dict, output_path: str) -> Path:
-    path = Path(output_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(model, indent=2, ensure_ascii=False), encoding="utf-8")
-    return path
+if "llm_opt_history" not in st.session_state:
+    st.session_state.llm_opt_history = []
+if "llm_opt_running" not in st.session_state:
+    st.session_state.llm_opt_running = False
 
 
 st.set_page_config(page_title="立体街区办公体量", layout="wide")
@@ -305,40 +88,40 @@ with st.sidebar:
 
     st.divider()
     site_size = st.number_input("site_size", 60.0, 200.0, DEFAULTS["site_size"], 1.0)
-    max_floors = st.slider("max_floors", 4, 10, DEFAULTS["max_floors"])
-    lobby_height = st.slider("lobby_height", 3.0, 9.0, DEFAULTS["lobby_height"], 0.1)
-    floor_height = st.slider("floor_height", 3.0, 5.0, DEFAULTS["floor_height"], 0.1)
+    max_floors = st.slider("max_floors", 4, 10, DEFAULTS["max_floors"], key="sb_max_floors")
+    lobby_height = st.slider("lobby_height", 3.0, 9.0, DEFAULTS["lobby_height"], 0.1, key="sb_lobby_height")
+    floor_height = st.slider("floor_height", 3.0, 5.0, DEFAULTS["floor_height"], 0.1, key="sb_floor_height")
     floor_plate_efficiency = st.slider("floor_plate_efficiency", 0.5, 1.0, DEFAULTS["floor_plate_efficiency"], 0.01)
 
     st.divider()
     st.subheader("西南体块")
     west_x = st.slider("west_x", 0.0, float(site_size), DEFAULTS["west_x"], 0.5)
     west_y = st.slider("west_y", 0.0, float(site_size), DEFAULTS["west_y"], 0.5)
-    west_length = st.slider("west_length", 18.0, 42.0, DEFAULTS["west_length"], 0.5)
-    west_width = st.slider("west_width", 16.0, 36.0, DEFAULTS["west_width"], 0.5)
-    west_floors = st.slider("west_floors", 1, max_floors, min(DEFAULTS["west_floors"], max_floors))
+    west_length = st.slider("west_length", 18.0, 42.0, DEFAULTS["west_length"], 0.5, key="sb_west_length")
+    west_width = st.slider("west_width", 16.0, 36.0, DEFAULTS["west_width"], 0.5, key="sb_west_width")
+    west_floors = st.slider("west_floors", 1, max_floors, min(DEFAULTS["west_floors"], max_floors), key="sb_west_floors")
 
     st.divider()
     st.subheader("东侧体块")
     east_x = st.slider("east_x", 0.0, float(site_size), DEFAULTS["east_x"], 0.5)
     east_y = st.slider("east_y", 0.0, float(site_size), DEFAULTS["east_y"], 0.5)
-    east_length = st.slider("east_length", 18.0, 42.0, DEFAULTS["east_length"], 0.5)
-    east_width = st.slider("east_width", 16.0, 36.0, DEFAULTS["east_width"], 0.5)
-    east_floors = st.slider("east_floors", 1, max_floors, min(DEFAULTS["east_floors"], max_floors))
+    east_length = st.slider("east_length", 18.0, 42.0, DEFAULTS["east_length"], 0.5, key="sb_east_length")
+    east_width = st.slider("east_width", 16.0, 36.0, DEFAULTS["east_width"], 0.5, key="sb_east_width")
+    east_floors = st.slider("east_floors", 1, max_floors, min(DEFAULTS["east_floors"], max_floors), key="sb_east_floors")
 
     st.divider()
     st.subheader("北侧体块")
     north_x = st.slider("north_x", 0.0, float(site_size), DEFAULTS["north_x"], 0.5)
     north_y = st.slider("north_y", 0.0, float(site_size), DEFAULTS["north_y"], 0.5)
-    north_length = st.slider("north_length", 18.0, 42.0, DEFAULTS["north_length"], 0.5)
-    north_width = st.slider("north_width", 16.0, 36.0, DEFAULTS["north_width"], 0.5)
-    north_floors = st.slider("north_floors", 1, max_floors, min(DEFAULTS["north_floors"], max_floors))
+    north_length = st.slider("north_length", 18.0, 42.0, DEFAULTS["north_length"], 0.5, key="sb_north_length")
+    north_width = st.slider("north_width", 16.0, 36.0, DEFAULTS["north_width"], 0.5, key="sb_north_width")
+    north_floors = st.slider("north_floors", 1, max_floors, min(DEFAULTS["north_floors"], max_floors), key="sb_north_floors")
 
     st.divider()
     st.subheader("一层平台与退台")
-    terrace_depth = st.slider("terrace_depth", 0.0, 6.0, DEFAULTS["terrace_depth"], 0.5)
-    platform_depth = st.slider("platform_depth", 12.0, 34.0, DEFAULTS["platform_depth"], 0.5)
-    platform_width = st.slider("platform_width", 10.0, 28.0, DEFAULTS["platform_width"], 0.5)
+    terrace_depth = st.slider("terrace_depth", 0.0, 6.0, DEFAULTS["terrace_depth"], 0.5, key="sb_terrace_depth")
+    platform_depth = st.slider("platform_depth", 12.0, 34.0, DEFAULTS["platform_depth"], 0.5, key="sb_platform_depth")
+    platform_width = st.slider("platform_width", 10.0, 28.0, DEFAULTS["platform_width"], 0.5, key="sb_platform_width")
 
     st.divider()
     skip_west_ground = st.checkbox("skip_west_ground", DEFAULTS["skip_west_ground"])
@@ -398,7 +181,7 @@ params = {
 
 try:
     model = generate_bridge_cluster(**params)
-    metrics = model_metrics(model)
+    metrics = model_metrics(model, gross_area_fn=gross_area)
 
     top_cols = st.columns(4)
     top_cols[0].metric("建筑面积", f"{metrics['area']:.1f} m²")
@@ -420,7 +203,7 @@ try:
     sim_data = read_eplustbl(effective_sim_dir)
     mapped_energy = model_energy_map(model, sim_data) if sim_data.get("exists") else {}
 
-    preview_tab, simulation_tab = st.tabs(["形体预览", "模拟结果"])
+    preview_tab, simulation_tab, llm_tab = st.tabs(["形体预览", "模拟结果", "LLM 优化"])
 
     with preview_tab:
         left, right = st.columns([2, 1])
@@ -490,7 +273,7 @@ try:
             total_site = sim_data["site_energy"].get("Total Site Energy", 0.0)
             total_source = sim_data["site_energy"].get("Total Source Energy", 0.0)
             conditioned_area = sim_data["building_area"].get("Net Conditioned Building Area", 0.0)
-            eui = total_site * 1000 / conditioned_area if conditioned_area else 0.0
+            eui = total_site * 1000 / conditioned_area if conditioned_area > 0.1 else 0.0
             mapped_total = sum(value.get("total_gj", 0.0) for value in mapped_energy.values())
             energy_source = "area_estimate"
             if mapped_energy and all(value.get("source") == "meter" for value in mapped_energy.values()):
@@ -566,6 +349,210 @@ try:
                     if file.is_file()
                 ]
                 st.dataframe(files, hide_index=True, use_container_width=True)
+
+    # ── LLM Optimization Tab ─────────────────────────────────────────────
+    with llm_tab:
+        st.subheader("LLM 驱动的能耗优化")
+        st.caption(
+            "每轮自动运行 EnergyPlus → LLM 读取能耗结果并给出参数调整建议 → 重新模拟。"
+            "迭代直到收敛或达到最大轮次。"
+        )
+
+        if not sim_data.get("exists"):
+            st.warning("请先在「模拟结果」Tab 中完成一次 EnergyPlus 模拟，再启动 LLM 优化。")
+        else:
+            # --- Config controls ---
+            opt_col1, opt_col2, opt_col3 = st.columns(3)
+            with opt_col1:
+                llm_max_iter = st.slider("最大迭代轮数", 2, 10, 5, key="llm_max_iter")
+            with opt_col2:
+                llm_conv_thr = st.number_input(
+                    "收敛阈值 (MJ/m²)", value=2.0, min_value=0.5, max_value=10.0,
+                    step=0.5, key="llm_conv_thr",
+                    help="连续 3 轮 EUI 累计改善 < 此值时停止",
+                )
+            with opt_col3:
+                include_ep_defaults = st.checkbox(
+                    "同时优化 EnergyPlus 默认参数",
+                    value=True, key="llm_ep_defaults",
+                    help="允许 LLM 调整照明功率密度、窗墙比、供暖/制冷设定点",
+                )
+
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                start_llm = st.button(
+                    "▶ 开始 LLM 优化", type="primary",
+                    use_container_width=True,
+                    disabled=st.session_state.llm_opt_running,
+                )
+            with btn_col2:
+                if st.button("重置历史", use_container_width=True):
+                    st.session_state.llm_opt_history = []
+                    st.session_state.llm_opt_running = False
+                    st.rerun()
+
+            # --- Run optimization ---
+            if start_llm and not st.session_state.llm_opt_running:
+                st.session_state.llm_opt_running = True
+                st.session_state.llm_opt_history = []
+
+                tunable = ALL_TUNABLE if include_ep_defaults else BRIDGE_CLUSTER_TUNABLE
+
+                # Streamlit runs synchronously; progress_bar.progress() calls inside a
+                # blocking loop will NOT render mid-run — they only take effect on rerun.
+                # We use a spinner + a live log container that accumulates text instead.
+                progress_placeholder = st.empty()
+                progress_placeholder.info(
+                    f"LLM 优化运行中，最多 {llm_max_iter} 轮，请等待…"
+                )
+                iter_records = []
+
+                def _on_iteration(record):
+                    iter_records.append(record)
+                    eui_str = f"{record.eui:.1f}" if record.eui < 1e5 else "FAIL"
+                    progress_placeholder.info(
+                        f"已完成 {len(iter_records)} / {llm_max_iter} 轮 | "
+                        f"最新 EUI: {eui_str} MJ/m²"
+                    )
+
+                try:
+                    with st.spinner(f"LLM 优化中（最多 {llm_max_iter} 轮）…"):
+                        history = run_llm_optimization(
+                            initial_params=dict(params),
+                            generator_fn=generate_bridge_cluster,
+                            tunable_spec=tunable,
+                            max_iterations=llm_max_iter,
+                            convergence_threshold=float(llm_conv_thr),
+                            output_base="output/llm_opt",
+                            progress_callback=_on_iteration,
+                        )
+                    st.session_state.llm_opt_history = [
+                        {
+                            "iteration": r.iteration,
+                            "eui": r.eui,
+                            "params": r.params,
+                            "ep_defaults_overrides": r.ep_defaults_overrides,
+                            "end_uses": r.end_uses,
+                            "llm_analysis": r.llm_analysis,
+                            "result_dir": r.result_dir,
+                            "error": r.error,
+                        }
+                        for r in history
+                    ]
+                except Exception as exc:
+                    st.error(f"LLM 优化出错：{exc}")
+                finally:
+                    st.session_state.llm_opt_running = False
+                    st.rerun()
+
+            # --- Display history ---
+            opt_history = st.session_state.llm_opt_history
+            if opt_history:
+                valid_recs = [r for r in opt_history if r["eui"] < 1e5]
+
+                if valid_recs:
+                    # EUI convergence chart
+                    st.subheader("EUI 收敛曲线")
+                    fig_eui = go.Figure(go.Scatter(
+                        x=[r["iteration"] for r in valid_recs],
+                        y=[r["eui"] for r in valid_recs],
+                        mode="lines+markers",
+                        marker=dict(size=8),
+                        line=dict(color="#2563EB"),
+                        hovertemplate="Iter %{x}: %{y:.1f} MJ/m²<extra></extra>",
+                    ))
+                    fig_eui.update_layout(
+                        height=280,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        xaxis_title="迭代轮次",
+                        yaxis_title="EUI (MJ/m²)",
+                    )
+                    st.plotly_chart(fig_eui, use_container_width=True)
+
+                    # Best result summary
+                    best = min(valid_recs, key=lambda r: r["eui"])
+                    st.subheader(f"最优结果 — 第 {best['iteration']} 轮  EUI: {best['eui']:.1f} MJ/m²")
+
+                    diff_rows = []
+                    for key, new_val in best["params"].items():
+                        old_val = params.get(key)
+                        if old_val is not None and old_val != new_val:
+                            diff_rows.append({
+                                "参数": key,
+                                "初始值": old_val,
+                                "最优值": new_val,
+                                "变化": f"{new_val - old_val:+.3g}" if isinstance(new_val, (int, float)) else "—",
+                            })
+                    for key, new_val in best["ep_defaults_overrides"].items():
+                        diff_rows.append({
+                            "参数": f"[EP] {key}",
+                            "初始值": "default",
+                            "最优值": new_val,
+                            "变化": "—",
+                        })
+                    if diff_rows:
+                        st.dataframe(diff_rows, hide_index=True, use_container_width=True)
+
+                    # Apply best params: write to sidebar widget session_state keys
+                    # so sliders reflect new values immediately on next render.
+                    _PARAM_TO_SB_KEY = {
+                        "max_floors": "sb_max_floors",
+                        "lobby_height": "sb_lobby_height",
+                        "floor_height": "sb_floor_height",
+                        "west_floors": "sb_west_floors",
+                        "west_length": "sb_west_length",
+                        "west_width": "sb_west_width",
+                        "east_floors": "sb_east_floors",
+                        "east_length": "sb_east_length",
+                        "east_width": "sb_east_width",
+                        "north_floors": "sb_north_floors",
+                        "north_length": "sb_north_length",
+                        "north_width": "sb_north_width",
+                        "terrace_depth": "sb_terrace_depth",
+                        "platform_depth": "sb_platform_depth",
+                        "platform_width": "sb_platform_width",
+                    }
+                    if st.button("应用最优参数到侧边栏", use_container_width=True):
+                        applied = []
+                        for param_key, val in best["params"].items():
+                            sb_key = _PARAM_TO_SB_KEY.get(param_key)
+                            if sb_key:
+                                st.session_state[sb_key] = val
+                                applied.append(param_key)
+                        if applied:
+                            st.success(f"已应用 {len(applied)} 个参数：{', '.join(applied)}")
+                            st.rerun()
+                        else:
+                            st.info("没有可应用的参数（可能与当前值相同）。")
+
+                # Per-iteration breakdown table
+                st.subheader("逐轮详情")
+                rows_display = []
+                for r in opt_history:
+                    eui_str = f"{r['eui']:.1f}" if r["eui"] < 1e5 else "FAIL"
+                    rows_display.append({
+                        "轮次": r["iteration"],
+                        "EUI (MJ/m²)": eui_str,
+                        "LLM 分析": r["llm_analysis"][:120] + "…" if r["llm_analysis"] and len(r["llm_analysis"]) > 120 else r["llm_analysis"] or r.get("error", ""),
+                        "结果目录": r["result_dir"] or "—",
+                    })
+                st.dataframe(rows_display, hide_index=True, use_container_width=True)
+
+                # Full analysis per iteration in expanders
+                with st.expander("查看各轮 LLM 完整分析"):
+                    for r in opt_history:
+                        eui_str = f"{r['eui']:.1f}" if r["eui"] < 1e5 else "FAIL"
+                        st.markdown(f"**Iter {r['iteration']} — EUI: {eui_str} MJ/m²**")
+                        if r.get("error"):
+                            st.error(r["error"])
+                        elif r["llm_analysis"]:
+                            st.write(r["llm_analysis"])
+                        if r["ep_defaults_overrides"]:
+                            st.json(r["ep_defaults_overrides"])
+                        st.divider()
+            else:
+                st.info("点击「▶ 开始 LLM 优化」启动优化循环。每轮约 3-10 秒。")
+
 
 except ValueError as exc:
     st.error(str(exc))

@@ -57,6 +57,8 @@ def make_segments(origin: float, total: float, count: int, gap: float) -> list[t
     if count <= 1:
         return [(origin, total)]
     segment = (total - gap * (count - 1)) / count
+    if segment <= 0:
+        raise ValueError(f"make_segments: gap {gap} × {count-1} exceeds total {total}")
     return [(origin + i * (segment + gap), segment) for i in range(count)]
 
 
