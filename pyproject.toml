@@ -17,6 +17,7 @@ dependencies = [
     # UI (optional — required only when running app.py)
     # streamlit>=1.40.0
     # plotly>=5.0.0
+    "httpx[socks]>=0.28.1",
 ]
 
 [tool.hatch.build.targets.wheel]

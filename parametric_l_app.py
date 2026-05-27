@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
+import os
 import re
+import time
 from pathlib import Path
 
 import plotly.graph_objects as go
 import streamlit as st
+from langchain_core.messages import HumanMessage
 
 from scripts.generate_l_gradient import generate_l_gradient
+from src.agent.llm import create_llm
+from src.agent.nodes.energyplus import (
+    ENERGYPLUS_SYSTEM_PROMPT as EP_SYSTEM_PROMPT,
+    _build_task_prompt as _build_ep_task_prompt,
+    _get_mcp_server_config as _get_ep_mcp_config,
+    _get_plugin_path as _get_ep_plugin_path,
+)
+from src.models.zone import BuildingModel, Dimensions, Point3D, Zone
 
 
 DEFAULTS = {
@@ -33,6 +45,109 @@ DEFAULTS = {
     "add_courtyard_marker": True,
     "simulation_dir": "output/direct_energyplus_real_run",
 }
+
+# ---------------------------------------------------------------------------
+# Session state for simulation results
+# ---------------------------------------------------------------------------
+if "ep_result_dir" not in st.session_state:
+    st.session_state.ep_result_dir = None
+
+
+# ---------------------------------------------------------------------------
+# EnergyPlus simulation runner
+# ---------------------------------------------------------------------------
+
+_MASS_HEIGHT_THRESHOLD = 1.0
+
+
+def _convert_model_to_building_model(model_dict: dict, building_name: str) -> BuildingModel:
+    zones = []
+    for z in model_dict["zones"]:
+        if z["dimensions"]["height"] < _MASS_HEIGHT_THRESHOLD:
+            continue
+        zones.append(Zone(
+            name=z["name"],
+            origin=Point3D(**z["origin"]),
+            dimensions=Dimensions(**z["dimensions"]),
+        ))
+    if not zones:
+        raise ValueError("模型中没有有效的建筑体块（高度 < 1m 的被跳过）。")
+    return BuildingModel(building_name=building_name, zones=zones)
+
+
+def _resolve_weather_path() -> str:
+    plugin_path = _get_ep_plugin_path()
+    weather = os.getenv("ENERGYPLUS_WEATHER_FILE", "data/weather/Shenzhen.epw")
+    if plugin_path and not Path(weather).is_absolute():
+        weather = str(plugin_path / weather)
+    return weather
+
+
+async def _async_run_ep_simulation(model_dict: dict, building_name: str) -> str | None:
+    """Run EnergyPlus simulation via MCP and return the eplustbl.csv directory."""
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+    from langchain_mcp_adapters.tools import load_mcp_tools
+    from langgraph.prebuilt import create_react_agent
+
+    building_model = _convert_model_to_building_model(model_dict, building_name)
+
+    server_config = _get_ep_mcp_config()
+    if server_config is None:
+        raise RuntimeError(
+            "EnergyPlus Agent 插件未找到。\n"
+            "请确认 plugins/energyplus_agent/ 存在并已安装依赖。"
+        )
+
+    weather_file = _resolve_weather_path()
+
+    # Use absolute output path so results land in the project output directory
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    abs_output_dir = Path.cwd() / "output" / f"ep_sim_{timestamp}"
+    idf_output_path = str(abs_output_dir / "building.idf")
+
+    task = _build_ep_task_prompt(building_model, idf_output_path, weather_file)
+    llm = create_llm()
+
+    client = MultiServerMCPClient(server_config)
+    async with client.session("energyplus") as session:
+        tools = await load_mcp_tools(session)
+        agent = create_react_agent(
+            model=llm,
+            tools=tools,
+            prompt=EP_SYSTEM_PROMPT,
+        )
+        await agent.ainvoke({"messages": [HumanMessage(content=task)]})
+
+    # Locate eplustbl.csv — EP agent may nest it under results/
+    csv_files = list(abs_output_dir.rglob("eplustbl.csv"))
+    if csv_files:
+        return str(csv_files[0].parent)
+
+    # Fallback: search plugin output directory (relative-path case)
+    plugin_path = _get_ep_plugin_path()
+    if plugin_path:
+        plugin_output = plugin_path / "output"
+        if plugin_output.exists():
+            csv_files = sorted(
+                plugin_output.rglob("eplustbl.csv"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            if csv_files:
+                return str(csv_files[0].parent)
+
+    return None
+
+
+def _run_ep_simulation(model_dict: dict, building_name: str) -> str | None:
+    """Synchronous wrapper — handles Streamlit's existing event loop."""
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            asyncio.run,
+            _async_run_ep_simulation(model_dict, building_name),
+        )
+        return future.result()
 
 
 def box_vertices(zone: dict) -> tuple[list[float], list[float], list[float]]:
@@ -500,7 +615,9 @@ try:
         st.warning("当前高度达到或超过 50m。")
 
     mass_zones = [z for z in model["zones"] if z["dimensions"]["height"] > 1.0]
-    sim_data = read_eplustbl(simulation_dir)
+    st.session_state["_last_model_zones"] = model["zones"]
+    effective_sim_dir = st.session_state.ep_result_dir or simulation_dir
+    sim_data = read_eplustbl(effective_sim_dir)
     mapped_energy = model_energy_map(model, sim_data) if sim_data.get("exists") else {}
 
     preview_tab, simulation_tab = st.tabs(["形体预览", "模拟结果"])
@@ -546,9 +663,28 @@ try:
             )
 
     with simulation_tab:
+        # --- Simulation trigger button ---
+        _mass_count = len(mass_zones)
+        if _mass_count > 30:
+            st.caption(f"⚠ 当前模型有 {_mass_count} 个体块，模拟将消耗较多 API 额度与时间。")
+        if st.button("▶ 执行 EnergyPlus 模拟", type="primary", use_container_width=True):
+            with st.spinner("正在执行 EnergyPlus 模拟，请耐心等待（可能需要数分钟）…"):
+                try:
+                    result_dir = _run_ep_simulation(model, building_name)
+                    if result_dir:
+                        st.session_state.ep_result_dir = result_dir
+                        st.success(f"模拟完成！结果目录：{result_dir}")
+                        st.rerun()
+                    else:
+                        st.error("模拟完成但未找到结果文件 eplustbl.csv。")
+                except Exception as e:
+                    st.error(f"模拟失败：{e}")
+
+        st.divider()
+
         if not sim_data.get("exists"):
             st.warning(f"没有找到模拟结果文件：{sim_data['path']}")
-            st.info("请选择包含 eplustbl.csv 的 EnergyPlus 结果目录。")
+            st.info("点击上方「▶ 执行 EnergyPlus 模拟」按钮开始模拟，或在左侧修改结果目录路径。")
         else:
             st.caption(f"结果文件：{sim_data['path']}")
             total_site = sim_data["site_energy"].get("Total Site Energy", 0.0)
@@ -623,7 +759,7 @@ try:
                 st.dataframe(energyplus_rows, hide_index=True, use_container_width=True)
 
                 st.subheader("模拟文件")
-                result_dir = Path(simulation_dir)
+                result_dir = Path(effective_sim_dir)
                 files = [
                     {"file": file.name, "size_kb": round(file.stat().st_size / 1024, 1)}
                     for file in sorted(result_dir.glob("*"))
