@@ -1,4 +1,4 @@
-"""Interactive Streamlit page for the gradient L office massing generator."""
+"""Interactive Streamlit page for the platform-connected office massing generator."""
 
 from __future__ import annotations
 
@@ -14,27 +14,39 @@ from scripts.ep_sim_utils import (
     read_eplustbl,
     run_ep_simulation,
 )
-from scripts.generate_l_gradient import generate_l_gradient
+from scripts.generate_bridge_cluster import generate_bridge_cluster, gross_area
 
 
 DEFAULTS = {
-    "building_name": "Gradient L Office",
-    "output_path": "output/gradient_l_office.json",
+    "building_name": "Platform Cluster Office",
+    "output_path": "output/platform_cluster_office.json",
     "site_size": 100.0,
-    "floors": 11,
-    "lobby_height": 5.5,
+    "max_floors": 9,
+    "lobby_height": 6.0,
     "floor_height": 4.0,
-    "base_x": 18.0,
-    "base_y": 16.0,
-    "arm_width": 13.5,
-    "horizontal_length": 58.0,
-    "vertical_length": 54.0,
-    "scatter_gap": 8.0,
-    "min_fragment_scale": 0.62,
-    "merge_power": 1.35,
-    "bridge_start_floor": 4,
-    "top_solid_floors": 3,
-    "add_courtyard_marker": True,
+    "floor_plate_efficiency": 1.0,
+    "west_x": 12.0,
+    "west_y": 18.0,
+    "west_length": 30.0,
+    "west_width": 24.0,
+    "west_floors": 6,
+    "east_x": 60.0,
+    "east_y": 26.0,
+    "east_length": 28.0,
+    "east_width": 24.0,
+    "east_floors": 7,
+    "north_x": 34.0,
+    "north_y": 64.0,
+    "north_length": 28.0,
+    "north_width": 22.0,
+    "north_floors": 5,
+    "terrace_depth": 3.0,
+    "platform_depth": 22.0,
+    "platform_width": 16.0,
+    "skip_west_ground": False,
+    "skip_east_ground": False,
+    "skip_north_ground": False,
+    "add_open_space_markers": True,
     "simulation_dir": "output/direct_energyplus_real_run",
 }
 
@@ -95,8 +107,11 @@ def zone_floor_index(name: str) -> int:
 
 def model_metrics(model: dict) -> dict:
     zones = model["zones"]
-    mass_zones = [z for z in zones if z["dimensions"]["height"] > 1.0]
-    area = sum(z["dimensions"]["length"] * z["dimensions"]["width"] for z in mass_zones)
+    mass_zones = [
+        z for z in zones
+        if z["dimensions"]["height"] > MASS_HEIGHT_THRESHOLD and z.get("category") != "open_space_reference"
+    ]
+    area = gross_area(model)
     max_height = max(
         z["origin"]["z"] + z["dimensions"]["height"]
         for z in mass_zones
@@ -129,11 +144,14 @@ def render_model(
     colorbar_shown = False
 
     for zone in zones:
-        is_courtyard = zone["name"] == "site_inner_courtyard_reference"
+        is_reference = zone.get("category") == "open_space_reference" or zone["name"] == "site_inner_courtyard_reference"
         x, y, z = box_vertices(zone)
         floor_index = zone_floor_index(zone["name"])
-        color = "#9CA3AF" if is_courtyard else "#2563EB"
-        if floor_index >= 9:
+        category = zone.get("category", "")
+        color = "#94A3B8" if is_reference else "#2563EB"
+        if category == "platform":
+            color = "#F97316"
+        elif floor_index >= 9:
             color = "#D97706"
         elif floor_index >= 5:
             color = "#059669"
@@ -161,11 +179,11 @@ def render_model(
             i=[0, 0, 0, 1, 2, 4, 5, 6, 4, 7, 3, 0],
             j=[1, 2, 4, 5, 3, 5, 6, 7, 7, 6, 7, 3],
             k=[2, 3, 5, 4, 7, 6, 1, 2, 0, 2, 0, 4],
-            opacity=0.22 if is_courtyard else opacity,
+            opacity=0.28 if is_reference else opacity,
             name=zone["name"],
             hovertemplate=hover + "<extra></extra>",
         )
-        if has_energy and not is_courtyard:
+        if has_energy and not is_reference:
             mesh_kwargs.update(
                 intensity=[value] * 8,
                 colorscale="Turbo",
@@ -187,7 +205,7 @@ def render_model(
                 y=ey,
                 z=ez,
                 mode="lines",
-                line=dict(color="#111827" if not is_courtyard else "#6B7280", width=2),
+                line=dict(color="#111827" if not is_reference else "#64748B", width=2),
                 hoverinfo="skip",
                 showlegend=False,
             ))
@@ -276,9 +294,9 @@ def save_json(model: dict, output_path: str) -> Path:
     return path
 
 
-st.set_page_config(page_title="参数化 L 形办公体量", layout="wide")
+st.set_page_config(page_title="立体街区办公体量", layout="wide")
 
-st.title("参数化 L 形办公体量")
+st.title("三体块一层平台立体街区")
 
 with st.sidebar:
     st.header("参数")
@@ -287,24 +305,46 @@ with st.sidebar:
 
     st.divider()
     site_size = st.number_input("site_size", 60.0, 200.0, DEFAULTS["site_size"], 1.0)
-    floors = st.slider("floors", 2, 14, DEFAULTS["floors"])
+    max_floors = st.slider("max_floors", 4, 10, DEFAULTS["max_floors"])
     lobby_height = st.slider("lobby_height", 3.0, 9.0, DEFAULTS["lobby_height"], 0.1)
     floor_height = st.slider("floor_height", 3.0, 5.0, DEFAULTS["floor_height"], 0.1)
+    floor_plate_efficiency = st.slider("floor_plate_efficiency", 0.5, 1.0, DEFAULTS["floor_plate_efficiency"], 0.01)
 
     st.divider()
-    base_x = st.slider("base_x", 0.0, float(site_size), DEFAULTS["base_x"], 0.5)
-    base_y = st.slider("base_y", 0.0, float(site_size), DEFAULTS["base_y"], 0.5)
-    arm_width = st.slider("arm_width", 6.0, 30.0, DEFAULTS["arm_width"], 0.5)
-    horizontal_length = st.slider("horizontal_length", 20.0, float(site_size), DEFAULTS["horizontal_length"], 0.5)
-    vertical_length = st.slider("vertical_length", 20.0, float(site_size), DEFAULTS["vertical_length"], 0.5)
+    st.subheader("西南体块")
+    west_x = st.slider("west_x", 0.0, float(site_size), DEFAULTS["west_x"], 0.5)
+    west_y = st.slider("west_y", 0.0, float(site_size), DEFAULTS["west_y"], 0.5)
+    west_length = st.slider("west_length", 18.0, 42.0, DEFAULTS["west_length"], 0.5)
+    west_width = st.slider("west_width", 16.0, 36.0, DEFAULTS["west_width"], 0.5)
+    west_floors = st.slider("west_floors", 1, max_floors, min(DEFAULTS["west_floors"], max_floors))
 
     st.divider()
-    scatter_gap = st.slider("scatter_gap", 0.0, 18.0, DEFAULTS["scatter_gap"], 0.5)
-    min_fragment_scale = st.slider("min_fragment_scale", 0.3, 1.0, DEFAULTS["min_fragment_scale"], 0.01)
-    merge_power = st.slider("merge_power", 0.4, 3.0, DEFAULTS["merge_power"], 0.05)
-    bridge_start_floor = st.slider("bridge_start_floor", 1, floors, min(DEFAULTS["bridge_start_floor"], floors))
-    top_solid_floors = st.slider("top_solid_floors", 1, floors - 1, min(DEFAULTS["top_solid_floors"], floors - 1))
-    add_courtyard_marker = st.checkbox("add_courtyard_marker", DEFAULTS["add_courtyard_marker"])
+    st.subheader("东侧体块")
+    east_x = st.slider("east_x", 0.0, float(site_size), DEFAULTS["east_x"], 0.5)
+    east_y = st.slider("east_y", 0.0, float(site_size), DEFAULTS["east_y"], 0.5)
+    east_length = st.slider("east_length", 18.0, 42.0, DEFAULTS["east_length"], 0.5)
+    east_width = st.slider("east_width", 16.0, 36.0, DEFAULTS["east_width"], 0.5)
+    east_floors = st.slider("east_floors", 1, max_floors, min(DEFAULTS["east_floors"], max_floors))
+
+    st.divider()
+    st.subheader("北侧体块")
+    north_x = st.slider("north_x", 0.0, float(site_size), DEFAULTS["north_x"], 0.5)
+    north_y = st.slider("north_y", 0.0, float(site_size), DEFAULTS["north_y"], 0.5)
+    north_length = st.slider("north_length", 18.0, 42.0, DEFAULTS["north_length"], 0.5)
+    north_width = st.slider("north_width", 16.0, 36.0, DEFAULTS["north_width"], 0.5)
+    north_floors = st.slider("north_floors", 1, max_floors, min(DEFAULTS["north_floors"], max_floors))
+
+    st.divider()
+    st.subheader("一层平台与退台")
+    terrace_depth = st.slider("terrace_depth", 0.0, 6.0, DEFAULTS["terrace_depth"], 0.5)
+    platform_depth = st.slider("platform_depth", 12.0, 34.0, DEFAULTS["platform_depth"], 0.5)
+    platform_width = st.slider("platform_width", 10.0, 28.0, DEFAULTS["platform_width"], 0.5)
+
+    st.divider()
+    skip_west_ground = st.checkbox("skip_west_ground", DEFAULTS["skip_west_ground"])
+    skip_east_ground = st.checkbox("skip_east_ground", DEFAULTS["skip_east_ground"])
+    skip_north_ground = st.checkbox("skip_north_ground", DEFAULTS["skip_north_ground"])
+    add_open_space_markers = st.checkbox("add_open_space_markers", DEFAULTS["add_open_space_markers"])
 
     st.divider()
     show_edges = st.checkbox("显示边线", True)
@@ -328,24 +368,36 @@ with st.sidebar:
 params = {
     "building_name": building_name,
     "site_size": site_size,
-    "floors": floors,
+    "max_floors": max_floors,
     "lobby_height": lobby_height,
     "floor_height": floor_height,
-    "base_x": base_x,
-    "base_y": base_y,
-    "arm_width": arm_width,
-    "horizontal_length": horizontal_length,
-    "vertical_length": vertical_length,
-    "scatter_gap": scatter_gap,
-    "min_fragment_scale": min_fragment_scale,
-    "merge_power": merge_power,
-    "bridge_start_floor": bridge_start_floor,
-    "top_solid_floors": top_solid_floors,
-    "add_courtyard_marker": add_courtyard_marker,
+    "floor_plate_efficiency": floor_plate_efficiency,
+    "west_x": west_x,
+    "west_y": west_y,
+    "west_length": west_length,
+    "west_width": west_width,
+    "west_floors": west_floors,
+    "east_x": east_x,
+    "east_y": east_y,
+    "east_length": east_length,
+    "east_width": east_width,
+    "east_floors": east_floors,
+    "north_x": north_x,
+    "north_y": north_y,
+    "north_length": north_length,
+    "north_width": north_width,
+    "north_floors": north_floors,
+    "terrace_depth": terrace_depth,
+    "platform_depth": platform_depth,
+    "platform_width": platform_width,
+    "skip_west_ground": skip_west_ground,
+    "skip_east_ground": skip_east_ground,
+    "skip_north_ground": skip_north_ground,
+    "add_open_space_markers": add_open_space_markers,
 }
 
 try:
-    model = generate_l_gradient(**params)
+    model = generate_bridge_cluster(**params)
     metrics = model_metrics(model)
 
     top_cols = st.columns(4)
@@ -359,7 +411,10 @@ try:
     if metrics["height"] >= 50:
         st.warning("当前高度达到或超过 50m。")
 
-    mass_zones = [z for z in model["zones"] if z["dimensions"]["height"] > 1.0]
+    mass_zones = [
+        z for z in model["zones"]
+        if z["dimensions"]["height"] > MASS_HEIGHT_THRESHOLD and z.get("category") != "open_space_reference"
+    ]
     st.session_state["_last_model_zones"] = model["zones"]
     effective_sim_dir = st.session_state.ep_result_dir or simulation_dir
     sim_data = read_eplustbl(effective_sim_dir)
@@ -381,7 +436,7 @@ try:
             st.download_button(
                 "下载当前 JSON",
                 data=json.dumps(model, indent=2, ensure_ascii=False),
-                file_name=Path(output_path).name or "gradient_l_office.json",
+                file_name=Path(output_path).name or "platform_cluster_office.json",
                 mime="application/json",
                 use_container_width=True,
             )
@@ -514,4 +569,4 @@ try:
 
 except ValueError as exc:
     st.error(str(exc))
-    st.info("请调整场地尺寸、L 形长度、层数、高度或顶部完整层数。")
+    st.info("请调整体块位置、尺寸、层数或平台参数。")
