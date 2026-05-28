@@ -112,6 +112,16 @@ class LightDef:
 
 
 @dataclass
+class EquipmentDef:
+    """Electric equipment object parameters (density-based)."""
+    watts_per_floor_area: float = 8.0     # W/m²
+    schedule_name: str = "AlwaysOnSchedule"
+    fraction_latent: float = 0.0
+    fraction_radiant: float = 0.30
+    fraction_lost: float = 0.0
+
+
+@dataclass
 class HvacDef:
     """HVAC thermostat + IdealLoadsAirSystem parameters."""
     thermostat_name: str = "DefaultThermostat"
@@ -151,6 +161,7 @@ class ConverterDefaults:
     schedules: list[ScheduleDef] = field(default_factory=list)
     people: PeopleDef = field(default_factory=PeopleDef)
     lights: LightDef = field(default_factory=LightDef)
+    equipment: EquipmentDef = field(default_factory=EquipmentDef)
     hvac: HvacDef = field(default_factory=HvacDef)
     window: WindowDef = field(default_factory=WindowDef)
 
@@ -336,4 +347,5 @@ def make_default_settings() -> ConverterDefaults:
         lights=lights,
         hvac=hvac,
         window=window,
+        equipment=EquipmentDef(),
     )

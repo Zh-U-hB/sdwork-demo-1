@@ -246,6 +246,7 @@ def evaluate_fitness(
             defaults=ep_defaults,
             output_base=sims_dir,
             run_id=eval_id,
+            weather_file=fixed_params.get("_weather_file"),
         )
     except Exception:
         cache[key] = PENALTY
@@ -474,4 +475,3 @@ def load_checkpoint(path: str) -> CheckpointState | None:
         config=data.get("config", {}),
         history=data.get("history", []),
     )
-

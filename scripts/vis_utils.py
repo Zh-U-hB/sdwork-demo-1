@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from scripts.ep_sim_utils import MASS_HEIGHT_THRESHOLD
 
@@ -218,6 +219,7 @@ def render_model(
                 f"<br>heating: {energy.get('heating_gj', 0):.2f} GJ"
                 f"<br>cooling: {energy.get('cooling_gj', 0):.2f} GJ"
                 f"<br>lighting: {energy.get('lighting_gj', 0):.2f} GJ"
+                f"<br>equipment: {energy.get('equipment_gj', 0):.2f} GJ"
                 f"<br>source: {energy.get('source', 'meter')}"
             )
 
@@ -394,6 +396,106 @@ def render_end_use_chart(end_uses: list[dict]) -> go.Figure:
     return fig
 
 
+def render_monthly_eui_chart(monthly_eui: list[dict]) -> go.Figure:
+    fig = go.Figure()
+    months = [row.get("month", "") for row in monthly_eui]
+    for key, label, color in [
+        ("equipment", "Equip", "#6B7280"),
+        ("light", "Light", "#FDE047"),
+        ("heat", "Heat", "#EF4444"),
+        ("cool", "Cool", "#38A3D8"),
+    ]:
+        fig.add_trace(go.Bar(
+            x=months,
+            y=[row.get(key, 0.0) for row in monthly_eui],
+            name=label,
+            marker_color=color,
+            hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.2f}} kWh/m²<extra></extra>",
+        ))
+    fig.update_layout(
+        title="Energy Use Intensity",
+        barmode="stack",
+        height=420,
+        margin=dict(l=10, r=10, t=48, b=10),
+        yaxis_title="[kWh/m²]",
+        xaxis_title="",
+        legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="center", x=0.5),
+    )
+    return fig
+
+
+def render_comfort_weather_chart(comfort: dict) -> go.Figure:
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=False,
+        vertical_spacing=0.12,
+        row_heights=[0.62, 0.38],
+        specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
+    )
+    weather_week = comfort.get("first_week_hourly", [])
+    zone_week = comfort.get("zone_first_week_hourly", [])
+    x_week = [row.get("label", "") for row in weather_week] or [row.get("label", "") for row in zone_week]
+
+    if weather_week:
+        fig.add_trace(go.Scatter(
+            x=x_week,
+            y=[row.get("dry_bulb_c", 0.0) for row in weather_week],
+            name="T-Ext",
+            mode="lines",
+            line=dict(color="#EF4444", width=1.5),
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=x_week,
+            y=[row.get("relative_humidity", 0.0) for row in weather_week],
+            name="Relative Humidity Ext",
+            mode="lines",
+            line=dict(color="#93C5FD", width=1.2),
+            opacity=0.62,
+        ), row=1, col=1, secondary_y=True)
+
+    if zone_week:
+        x_zone = [row.get("label", "") for row in zone_week]
+        for key, label, color in [
+            ("operative", "T-Operative", "#DC2626"),
+            ("air", "T-Air", "#F97316"),
+            ("radiant", "T-MRT", "#F59E0B"),
+        ]:
+            vals = [row.get(key) for row in zone_week]
+            if any(v is not None for v in vals):
+                fig.add_trace(go.Scatter(
+                    x=x_zone,
+                    y=vals,
+                    name=label,
+                    mode="lines",
+                    line=dict(color=color, width=1.4),
+                ), row=1, col=1)
+
+    annual = comfort.get("annual_daily", [])
+    if annual:
+        fig.add_trace(go.Scatter(
+            x=[row.get("day_index", idx + 1) for idx, row in enumerate(annual)],
+            y=[row.get("dry_bulb_c", 0.0) for row in annual],
+            name="Annual T-Ext",
+            mode="lines",
+            line=dict(color="#F87171", width=1),
+            showlegend=False,
+        ), row=2, col=1)
+
+    fig.update_layout(
+        title="Outdoor / Zone Temperature and Humidity",
+        height=560,
+        margin=dict(l=10, r=10, t=48, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    fig.update_yaxes(title_text="Temperature [°C]", row=1, col=1)
+    fig.update_yaxes(title_text="Relative Humidity [%]", row=1, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="T [°C]", row=2, col=1)
+    fig.update_xaxes(title_text="First week", row=1, col=1)
+    fig.update_xaxes(title_text="Day of year", row=2, col=1)
+    return fig
+
+
 def render_end_use_pie(end_uses: list[dict]) -> go.Figure:
     fig = go.Figure(go.Pie(
         labels=[item["end_use"] for item in end_uses],
@@ -411,10 +513,11 @@ def render_zone_energy_chart(zone_rows: list[dict]) -> go.Figure:
         ("heating_gj", "Heating", "#DC2626"),
         ("cooling_gj", "Cooling", "#2563EB"),
         ("lighting_gj", "Lighting", "#F59E0B"),
+        ("equipment_gj", "Equipment", "#6B7280"),
     ]:
         fig.add_trace(go.Bar(
             x=[row["model_zone"] for row in zone_rows],
-            y=[row[key] for row in zone_rows],
+            y=[row.get(key, 0.0) for row in zone_rows],
             name=label,
             marker_color=color,
             hovertemplate=f"<b>%{{x}}</b><br>{label}: %{{y:.2f}} GJ<extra></extra>",

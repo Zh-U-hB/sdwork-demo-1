@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import csv
+import json
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -39,6 +41,13 @@ from src.models.zone import BuildingModel, Dimensions, Point3D, Zone
 # ---------------------------------------------------------------------------
 
 MASS_HEIGHT_THRESHOLD = 1.0
+MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+WEATHER_CITY_FILES = {
+    "Shenzhen": "Shenzhen.epw",
+    "Beijing": "CHN_Beijing.Beijing.545110_CSWD.epw",
+    "Shanghai": "CHN_Shanghai.Shanghai.583620_CSWD.epw",
+    "Harbin": "CHN_Heilongjiang.Harbin.509530_CSWD.epw",
+}
 
 
 def ensure_energyplus_on_path() -> str | None:
@@ -80,12 +89,19 @@ def convert_model_to_building_model(model_dict: dict, building_name: str) -> Bui
 # ---------------------------------------------------------------------------
 
 
-def resolve_weather_path() -> str:
+def resolve_weather_path(city: str | None = None) -> str:
     plugin_path = _get_ep_plugin_path()
-    weather = os.getenv("ENERGYPLUS_WEATHER_FILE", "data/weather/Shenzhen.epw")
+    if city:
+        weather = f"data/weather/{WEATHER_CITY_FILES.get(city, WEATHER_CITY_FILES['Shenzhen'])}"
+    else:
+        weather = os.getenv("ENERGYPLUS_WEATHER_FILE", "data/weather/Shenzhen.epw")
     if plugin_path and not Path(weather).is_absolute():
         weather = str(plugin_path / weather)
     return weather
+
+
+def available_weather_cities() -> dict[str, str]:
+    return {city: resolve_weather_path(city) for city in WEATHER_CITY_FILES}
 
 
 # ---------------------------------------------------------------------------
@@ -218,13 +234,23 @@ def run_ep_simulation_direct(
         output_dir = Path(output_base) / f"run_{timestamp}_{ns:09d}"
 
     try:
-        return convert_and_run(
+        result_dir = convert_and_run(
             model_dict,
             output_dir=output_dir,
             weather_file=weather_file,
             defaults=defaults,
             run_simulation=True,
         )
+        if result_dir:
+            context = {
+                "weather_file": str(weather_file) if weather_file is not None else resolve_weather_path(),
+                "building_name": model_dict.get("building_name", building_name or ""),
+            }
+            Path(result_dir, "simulation_context.json").write_text(
+                json.dumps(context, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        return result_dir
     except Exception as exc:
         print(f"[run_ep_simulation_direct] ERROR: {exc}")
         return None
@@ -266,6 +292,140 @@ def dedupe_metric_rows(rows: list[dict], key_field: str, value_field: str) -> li
         if key not in seen or value > seen[key][value_field]:
             seen[key] = row
     return [seen[key] for key in seen]
+
+
+def _month_from_datetime_label(value: str) -> int | None:
+    match = re.search(r"(\d{1,2})/", value or "")
+    if not match:
+        return None
+    month = int(match.group(1))
+    return month if 1 <= month <= 12 else None
+
+
+def _parse_epw_weather(epw_path: str | Path | None) -> dict:
+    if not epw_path:
+        return {}
+    path = Path(epw_path)
+    if not path.exists():
+        return {}
+    hourly = []
+    daily: dict[tuple[int, int], dict[str, float]] = {}
+    try:
+        with path.open(newline="", encoding="utf-8", errors="replace") as file:
+            reader = csv.reader(file)
+            for _ in range(8):
+                next(reader, None)
+            for row in reader:
+                if len(row) < 9:
+                    continue
+                month = int(parse_float(row[1]))
+                day = int(parse_float(row[2]))
+                hour = int(parse_float(row[3]))
+                dry_bulb = parse_float(row[6])
+                rh = parse_float(row[8])
+                rec = {
+                    "month": month,
+                    "day": day,
+                    "hour": hour,
+                    "label": f"{month}/{day} {hour:02d}:00",
+                    "dry_bulb_c": dry_bulb,
+                    "relative_humidity": rh,
+                }
+                if month == 1 and day <= 7:
+                    hourly.append(rec)
+                bucket = daily.setdefault((month, day), {"dry_sum": 0.0, "rh_sum": 0.0, "count": 0})
+                bucket["dry_sum"] += dry_bulb
+                bucket["rh_sum"] += rh
+                bucket["count"] += 1
+    except (OSError, ValueError):
+        return {}
+    annual = []
+    day_index = 1
+    for (month, day), values in sorted(daily.items()):
+        count = values["count"] or 1
+        annual.append({
+            "day_index": day_index,
+            "month": month,
+            "day": day,
+            "dry_bulb_c": values["dry_sum"] / count,
+            "relative_humidity": values["rh_sum"] / count,
+        })
+        day_index += 1
+    return {"first_week_hourly": hourly, "annual_daily": annual}
+
+
+def _categorize_energy_column(name: str) -> tuple[str | None, bool]:
+    lowered = name.lower()
+    is_meter = ":" in name
+    if "heating:energytransfer" in lowered or "total heating energy" in lowered:
+        return "heat", is_meter
+    if "cooling:energytransfer" in lowered or "total cooling energy" in lowered:
+        return "cool", is_meter
+    if "interiorlights:electricity" in lowered or "lights electricity energy" in lowered:
+        return "light", is_meter
+    if "interiorequipment:electricity" in lowered or "electric equipment electricity energy" in lowered:
+        return "equipment", is_meter
+    return None, is_meter
+
+
+def _read_output_csv_charts(result_dir: str | Path, area_m2: float, epw_path: str | Path | None) -> dict:
+    path = Path(result_dir) / "eplusout.csv"
+    monthly = {
+        month: {"month": MONTH_LABELS[month - 1], "heat": 0.0, "cool": 0.0, "light": 0.0, "equipment": 0.0}
+        for month in range(1, 13)
+    }
+    comfort_rows = []
+    if path.exists():
+        try:
+            with path.open(newline="", encoding="utf-8", errors="replace") as file:
+                reader = csv.reader(file)
+                header = next(reader, [])
+                energy_columns: dict[str, dict[str, list[int]]] = {
+                    key: {"meter": [], "variable": []}
+                    for key in ("heat", "cool", "light", "equipment")
+                }
+                temp_columns: dict[str, list[int]] = {"operative": [], "air": [], "radiant": []}
+                for idx, col in enumerate(header):
+                    cat, is_meter = _categorize_energy_column(col)
+                    if cat and ("[j]" in col.lower() or "(monthly)" in col.lower()):
+                        energy_columns[cat]["meter" if is_meter else "variable"].append(idx)
+                    lowered = col.lower()
+                    if "zone operative temperature" in lowered:
+                        temp_columns["operative"].append(idx)
+                    elif "zone mean air temperature" in lowered:
+                        temp_columns["air"].append(idx)
+                    elif "zone mean radiant temperature" in lowered:
+                        temp_columns["radiant"].append(idx)
+
+                row_index = 0
+                for row in reader:
+                    if not row:
+                        continue
+                    row_index += 1
+                    month = _month_from_datetime_label(row[0])
+                    if month:
+                        for cat in ("heat", "cool", "light", "equipment"):
+                            cols = energy_columns[cat]["meter"] or energy_columns[cat]["variable"]
+                            total_j = sum(parse_float(row[i]) for i in cols if i < len(row))
+                            monthly[month][cat] += total_j / 3_600_000.0 / area_m2 if area_m2 > 0 else 0.0
+                    if len(comfort_rows) < 168:
+                        rec = {"step": len(comfort_rows) + 1, "label": row[0] or str(row_index)}
+                        for key, cols in temp_columns.items():
+                            vals = [parse_float(row[i]) for i in cols if i < len(row) and row[i].strip()]
+                            if vals:
+                                rec[key] = sum(vals) / len(vals)
+                        if len(rec) > 2:
+                            comfort_rows.append(rec)
+        except OSError:
+            pass
+    weather = _parse_epw_weather(epw_path)
+    return {
+        "monthly_eui": list(monthly.values()),
+        "comfort": {
+            "zone_first_week_hourly": comfort_rows,
+            **weather,
+        },
+    }
 
 
 def end_use_total(end_uses: list[dict], name: str) -> float:
@@ -337,7 +497,12 @@ def read_eplustbl(result_dir: str) -> dict:
         if ":Zone:" in meter_name or ":ZONE:" in meter_name:
             parts = meter_name.split(":")
             zone_name = parts[-1].upper()
-            bucket = zone_energy.setdefault(zone_name, {"heating_gj": 0.0, "cooling_gj": 0.0, "lighting_gj": 0.0})
+            bucket = zone_energy.setdefault(zone_name, {
+                "heating_gj": 0.0,
+                "cooling_gj": 0.0,
+                "lighting_gj": 0.0,
+                "equipment_gj": 0.0,
+            })
             energy_gj = parse_float(row[2]) if len(row) > 2 else 0.0
             lowered = meter_name.lower()
             if lowered.startswith("heating:energytransfer:zone:"):
@@ -346,22 +511,41 @@ def read_eplustbl(result_dir: str) -> dict:
                 bucket["cooling_gj"] += energy_gj
             elif lowered.startswith("interiorlights:electricity:zone:"):
                 bucket["lighting_gj"] += energy_gj
+            elif lowered.startswith("interiorequipment:electricity:zone:"):
+                bucket["equipment_gj"] += energy_gj
 
     for values in zone_energy.values():
-        values["total_gj"] = values["heating_gj"] + values["cooling_gj"] + values["lighting_gj"]
+        values["total_gj"] = (
+            values["heating_gj"]
+            + values["cooling_gj"]
+            + values["lighting_gj"]
+            + values.get("equipment_gj", 0.0)
+        )
 
     end_uses = dedupe_metric_rows(end_uses, "end_use", "total_gj")
     demand_end_uses = dedupe_metric_rows(demand_end_uses, "end_use", "demand_w")
+    context_path = Path(result_dir) / "simulation_context.json"
+    context = {}
+    if context_path.exists():
+        try:
+            context = json.loads(context_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            context = {}
+    weather_file = context.get("weather_file")
+    area = building_area.get("Net Conditioned Building Area") or building_area.get("Total Building Area") or 0.0
+    charts = _read_output_csv_charts(result_dir, area, weather_file)
 
     return {
         "path": path,
         "exists": True,
+        "context": context,
         "site_energy": site_energy,
         "building_area": building_area,
         "end_uses": end_uses,
         "demand_end_uses": demand_end_uses,
         "zone_summary": zone_summary,
         "zone_energy": zone_energy,
+        "charts": charts,
     }
 
 
@@ -393,6 +577,7 @@ def model_energy_map(model: dict, sim_data: dict) -> dict[str, dict[str, float]]
     heating = end_use_total(sim_data.get("end_uses", []), "Heating")
     cooling = end_use_total(sim_data.get("end_uses", []), "Cooling")
     lighting = end_use_total(sim_data.get("end_uses", []), "Interior Lighting")
+    equipment = end_use_total(sim_data.get("end_uses", []), "Interior Equipment")
 
     for zone in mass_zones:
         area = zone["dimensions"]["length"] * zone["dimensions"]["width"]
@@ -401,7 +586,8 @@ def model_energy_map(model: dict, sim_data: dict) -> dict[str, dict[str, float]]
             "heating_gj": heating * share,
             "cooling_gj": cooling * share,
             "lighting_gj": lighting * share,
-            "total_gj": (heating + cooling + lighting) * share,
+            "equipment_gj": equipment * share,
+            "total_gj": (heating + cooling + lighting + equipment) * share,
             "source": "area_estimate",
         }
 

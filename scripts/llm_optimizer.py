@@ -400,6 +400,7 @@ def run_llm_optimization(
     initial_ep_overrides: dict | None = None,
     partition_enabled: bool = True,
     perimeter_depth: float = 4.0,
+    weather_file: str | Path | None = None,
     output_base: str = "output/llm_opt",
     llm=None,
     progress_callback: Callable[[IterationRecord], None] | None = None,
@@ -460,6 +461,7 @@ def run_llm_optimization(
         "convergence_threshold": float(convergence_threshold),
         "partition_enabled": bool(partition_enabled),
         "perimeter_depth": float(perimeter_depth),
+        "weather_file": str(weather_file) if weather_file else None,
         "initial_params": dict(initial_params),
         "initial_ep_overrides": dict(initial_ep_overrides or {}),
         "tunable_keys": sorted(list((tunable_spec or ALL_TUNABLE).keys())),
@@ -517,6 +519,7 @@ def run_llm_optimization(
             defaults=ep_defaults,
             output_base=sims_dir,
             run_id=iter_id,
+            weather_file=weather_file,
         )
 
         if result_dir is None:

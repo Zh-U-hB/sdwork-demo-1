@@ -51,8 +51,10 @@ from idfpy.models import (
 )
 from idfpy.models.outputs import (
     OutputDiagnosticsDiagnosticsItem,
+    OutputMeter,
     OutputTableSummaryReportsReportsItem,
 )
+from idfpy.models.internal_gains import ElectricEquipment
 from idfpy.models.schedules import ScheduleCompactDataItem
 from idfpy.models.thermal_zones import (
     BuildingSurfaceDetailedVerticesItem,
@@ -939,6 +941,18 @@ def _add_zone_loads_and_hvac(idf: IDF, zn: str, defaults: ConverterDefaults) -> 
         fraction_radiant=lgt.fraction_radiant,
         fraction_visible=lgt.fraction_visible,
     ))
+    eqp = defaults.equipment
+    if eqp.watts_per_floor_area > 0:
+        idf.add(ElectricEquipment(
+            name=f"{zn}_Equipment",
+            zone_or_zonelist_or_space_or_spacelist_name=zn,
+            schedule_name=eqp.schedule_name,
+            design_level_calculation_method="Watts/Area",
+            watts_per_floor_area=eqp.watts_per_floor_area,
+            fraction_latent=eqp.fraction_latent,
+            fraction_radiant=eqp.fraction_radiant,
+            fraction_lost=eqp.fraction_lost,
+        ))
     idf.add(HVACTemplateZoneIdealLoadsAirSystem(
         zone_name=zn,
         template_thermostat_name=defaults.hvac.thermostat_name,
@@ -1047,8 +1061,23 @@ def convert_and_run(
         "Zone Ideal Loads Heat Recovery Total Heating Energy",
         "Zone Ideal Loads Supply Air Total Cooling Energy",
         "Zone Lights Electricity Energy",
+        "Zone Electric Equipment Electricity Energy",
     ]:
         idf.add(OutputVariable(key_value="*", variable_name=var, reporting_frequency="Annual"))
+        idf.add(OutputVariable(key_value="*", variable_name=var, reporting_frequency="Monthly"))
+    for var in [
+        "Zone Operative Temperature",
+        "Zone Mean Air Temperature",
+        "Zone Mean Radiant Temperature",
+    ]:
+        idf.add(OutputVariable(key_value="*", variable_name=var, reporting_frequency="Hourly"))
+    for meter in [
+        "Heating:EnergyTransfer",
+        "Cooling:EnergyTransfer",
+        "InteriorLights:Electricity",
+        "InteriorEquipment:Electricity",
+    ]:
+        idf.add(OutputMeter(key_name=meter, reporting_frequency="Monthly"))
 
     # Building & location
     idf.add(Building(
@@ -1204,6 +1233,7 @@ def convert_and_run(
         weather=epw_path,
         output_dir=results_dir,
         expand_objects=True,
+        readvars=True,
         echo=False,
     )
 
@@ -1218,4 +1248,3 @@ def convert_and_run(
 
     print(f"[idf_converter] Simulation failed. err: {result.err}")
     return None
-

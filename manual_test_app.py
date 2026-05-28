@@ -16,7 +16,13 @@ import time
 import plotly.graph_objects as go
 import streamlit as st
 
-from scripts.ep_sim_utils import MASS_HEIGHT_THRESHOLD, model_energy_map, read_eplustbl, run_ep_simulation_direct
+from scripts.ep_sim_utils import (
+    MASS_HEIGHT_THRESHOLD,
+    available_weather_cities,
+    model_energy_map,
+    read_eplustbl,
+    run_ep_simulation_direct,
+)
 from scripts.generate_20260528 import generate_20260528, gross_area
 from scripts.ga_core_20260528 import (
     CheckpointState,
@@ -37,6 +43,8 @@ from scripts.vis_utils import (
     model_metrics,
     render_end_use_chart,
     render_end_use_pie,
+    render_comfort_weather_chart,
+    render_monthly_eui_chart,
     render_model,
     render_zone_energy_chart,
     save_json,
@@ -174,6 +182,19 @@ with st.sidebar:
     st.caption("运行 EnergyPlus 时，全局 IDF 窗墙比会与几何 window_wwr 同步。")
 
     st.divider()
+    st.subheader("模拟设置")
+    weather_city_paths = available_weather_cities()
+    weather_city = st.selectbox(
+        "Weather city / EPW",
+        options=list(weather_city_paths.keys()),
+        index=0,
+        format_func=lambda city: city,
+    )
+    weather_file = weather_city_paths[weather_city]
+    st.caption(f"EPW: `{Path(weather_file).name}`")
+    show_extra_result_charts = st.checkbox("模拟结果包含 EUI 月度图和气象/舒适图", value=True)
+
+    st.divider()
     st.subheader("分区（Partition）")
     partition_enabled = st.checkbox("启用分区后再模拟（推荐）", value=True)
     perimeter_depth = st.slider("perimeter_depth (m)", 1.0, 8.0, 4.0, 0.5)
@@ -199,6 +220,7 @@ def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> 
     with cols[0]:
         st.subheader("模拟")
         st.caption("走 direct 路径：JSON → IDF → EnergyPlus（无 MCP/LLM）。")
+        st.caption(f"当前城市：{weather_city} | `{Path(weather_file).name}`")
         if st.button("▶ 运行 EnergyPlus（Direct）", type="primary", use_container_width=True, key=f"{key_prefix}_run_ep"):
             from scripts.facade_params import make_ep_defaults_for_geometry
 
@@ -208,6 +230,7 @@ def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> 
                     sim_model,
                     building_name=building_name,
                     defaults=ep_defaults,
+                    weather_file=weather_file,
                 )
             if result_dir:
                 st.session_state.mt_last_result_dir = result_dir
@@ -253,6 +276,23 @@ def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> 
                     key=f"{key_prefix}_end_use_pie",
                 )
 
+            if show_extra_result_charts:
+                charts = sim_data.get("charts", {})
+                st.subheader("附加结果图表")
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    st.plotly_chart(
+                        render_monthly_eui_chart(charts.get("monthly_eui", [])),
+                        use_container_width=True,
+                        key=f"{key_prefix}_monthly_eui",
+                    )
+                with ec2:
+                    st.plotly_chart(
+                        render_comfort_weather_chart(charts.get("comfort", {})),
+                        use_container_width=True,
+                        key=f"{key_prefix}_comfort_weather",
+                    )
+
             if mapped_energy:
                 st.subheader("模型体块分区能耗（stacked）")
                 mass_zones = [
@@ -266,6 +306,7 @@ def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> 
                             "heating_gj": mapped_energy.get(z["name"], {}).get("heating_gj", 0.0),
                             "cooling_gj": mapped_energy.get(z["name"], {}).get("cooling_gj", 0.0),
                             "lighting_gj": mapped_energy.get(z["name"], {}).get("lighting_gj", 0.0),
+                            "equipment_gj": mapped_energy.get(z["name"], {}).get("equipment_gj", 0.0),
                         } for z in mass_zones[:60]]
                     ),
                     use_container_width=True,
@@ -446,6 +487,7 @@ with tab_llm:
                     convergence_threshold=float(llm_conv_thr),
                     partition_enabled=bool(partition_enabled),
                     perimeter_depth=float(perimeter_depth),
+                    weather_file=weather_file,
                 )
             st.success("LLM 优化完成。")
             st.rerun()
@@ -595,6 +637,7 @@ with tab_ga:
         overall_best_result_dir = None
 
         fixed_params = dict(current_params)
+        fixed_params["_weather_file"] = weather_file
         for result in run_ga(config, seed=int(seed), fixed_params=fixed_params):
             total_evals += len(result.pop_fitness)
             history_run.append({

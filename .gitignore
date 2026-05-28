@@ -24,6 +24,8 @@ output/*.json
 output/*.idf
 output/*.yaml
 output/*.csv
+readvars.audit
+visualization/
 
 # ── Tools & editors ───────────────────────────────────────────────────────────
 .claude/
