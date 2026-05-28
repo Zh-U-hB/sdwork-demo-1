@@ -133,6 +133,27 @@ def random_individual(genes: list[GeneSpec]) -> dict:
     return ind
 
 
+def baseline_individual_from_fixed(fixed_params: dict, genes: list[GeneSpec]) -> dict:
+    """Build a valid-ish individual from current fixed params (UI baseline)."""
+    ind: dict = {}
+    for g in genes:
+        if g.name in fixed_params:
+            val = fixed_params[g.name]
+            if g.is_int:
+                try:
+                    val = int(val)
+                except Exception:
+                    val = int(round(float(val)))
+            else:
+                val = float(val)
+            ind[g.name] = _clamp(val, g)
+        else:
+            # fallback to midpoint
+            mid = (g.low + g.high) / 2
+            ind[g.name] = _clamp(mid, g)
+    return ind
+
+
 def crossover(p1: dict, p2: dict, genes: list[GeneSpec], alpha: float) -> tuple[dict, dict]:
     c1, c2 = {}, {}
     for g in genes:
@@ -163,6 +184,7 @@ def mutate(ind: dict, genes: list[GeneSpec], rate: float, sigma: float) -> dict:
 
 
 def tournament_select(population: list[dict], fitness: list[float], k: int) -> dict:
+    k = max(1, min(int(k), len(population)))
     indices = random.sample(range(len(population)), k)
     best = min(indices, key=lambda i: fitness[i])
     return dict(population[best])
@@ -179,16 +201,18 @@ def evaluate_fitness(
 ) -> tuple[float, dict | None, str | None]:
     """Return (EUI, model_dict, result_dir). model_dict is None if evaluation failed."""
     full_params = {**fixed_params, **individual}
+    # Remove GA-internal keys before calling the generator.
+    geo_params = {k: v for k, v in full_params.items() if not str(k).startswith("_")}
     # decode bool
-    if "add_aerial_platforms" in full_params:
-        full_params["add_aerial_platforms"] = bool(int(full_params["add_aerial_platforms"]))
+    if "add_aerial_platforms" in geo_params:
+        geo_params["add_aerial_platforms"] = bool(int(geo_params["add_aerial_platforms"]))
 
-    key = _params_hash(full_params)
+    key = _params_hash(geo_params)
     if use_cache and key in cache:
         return cache[key], None, None
 
     try:
-        raw_model = generate_20260528(**full_params)
+        raw_model = generate_20260528(**geo_params)
     except Exception:
         cache[key] = PENALTY
         return PENALTY, None, None
@@ -199,8 +223,8 @@ def evaluate_fitness(
             model = partition_model_by_floor(
                 raw_model,
                 perimeter_depth=float(fixed_params.get("_perimeter_depth", 4.0)),
-                lobby_height=float(full_params.get("lobby_height", 6.0)),
-                floor_height=float(full_params.get("floor_height", 4.0)),
+                lobby_height=float(geo_params.get("lobby_height", 6.0)),
+                floor_height=float(geo_params.get("floor_height", 4.0)),
             )
         except Exception:
             cache[key] = PENALTY
@@ -210,7 +234,7 @@ def evaluate_fitness(
         eval_id = eval_subdir
         result_dir = run_ep_simulation(
             model,
-            full_params.get("building_name", "GA_20260528"),
+            geo_params.get("building_name", "GA_20260528"),
             output_base=sims_dir,
             run_id=eval_id,
         )
@@ -299,9 +323,30 @@ def run_ga(
     fixed_params["_perimeter_depth"] = float(config.perimeter_depth)
 
     population = [random_individual(genes) for _ in range(config.pop_size)]
+    # Force-populate a baseline individual derived from the current UI params to
+    # avoid the common case where all-random individuals violate constraints.
+    if population:
+        population[0] = baseline_individual_from_fixed(fixed_params, genes)
     fitness = [PENALTY] * config.pop_size
     best_model = None
     best_result_dir = None
+
+    # Always keep a baseline model for UI display/debugging, even if all individuals
+    # are penalized. This mirrors the user's current sidebar parameters.
+    try:
+        baseline_geo = {k: v for k, v in fixed_params.items() if not str(k).startswith("_")}
+        raw = generate_20260528(**baseline_geo)
+        if fixed_params.get("_partition_enabled", True):
+            raw = partition_model_by_floor(
+                raw,
+                perimeter_depth=float(fixed_params.get("_perimeter_depth", 4.0)),
+                lobby_height=float(baseline_geo.get("lobby_height", 6.0)),
+                floor_height=float(baseline_geo.get("floor_height", 4.0)),
+            )
+        best_model = raw
+    except Exception:
+        # If even baseline fails, we fall back to None and let the UI instruct the user.
+        best_model = None
 
     for i, ind in enumerate(population):
         eval_subdir = f"gen_init/ind_{i:02d}_{time.time_ns() % 1_000_000_000:09d}"
@@ -314,7 +359,7 @@ def run_ga(
             use_cache=config.use_cache,
         )
         fitness[i] = fit
-        if fit < PENALTY and model is not None:
+        if (fit < PENALTY and model is not None) or (best_model is None and model is not None):
             best_model = model
             best_result_dir = rdir
 

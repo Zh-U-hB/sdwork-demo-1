@@ -617,17 +617,8 @@ with tab_ga:
                     except Exception:
                         model = None
                 if model is None:
-                    full = {**current_params, **best_params}
-                    if "add_aerial_platforms" in full:
-                        full["add_aerial_platforms"] = bool(int(full["add_aerial_platforms"]))
-                    model = generate_20260528(**full)
-                    if partition_enabled:
-                        model = partition_model_by_floor(
-                            model,
-                            perimeter_depth=float(perimeter_depth),
-                            lobby_height=float(full.get("lobby_height", 6.0)),
-                            floor_height=float(full.get("floor_height", 4.0)),
-                        )
+                    st.warning("本次 GA 未产生可用的最优模型（可能全部个体被约束惩罚）。请查看曲线/日志或调整参数后重试。")
+                    st.stop()
                 st.plotly_chart(
                     render_model(model, site_size, show_edges, opacity),
                     use_container_width=True,
