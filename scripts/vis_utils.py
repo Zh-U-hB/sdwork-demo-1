@@ -73,6 +73,54 @@ def box_edges(zone: dict) -> tuple[list[float], list[float], list[float]]:
     return ex, ey, ez
 
 
+def window_vertices(window: dict) -> tuple[list[float], list[float], list[float]] | None:
+    points = window.get("vertices") or []
+    if len(points) != 4:
+        return None
+    return (
+        [point["x"] for point in points],
+        [point["y"] for point in points],
+        [point["z"] for point in points],
+    )
+
+
+def window_edges(window: dict) -> tuple[list[float], list[float], list[float]] | None:
+    vertices = window_vertices(window)
+    if vertices is None:
+        return None
+    x, y, z = vertices
+    ex, ey, ez = [], [], []
+    for start, end in [(0, 1), (1, 2), (2, 3), (3, 0)]:
+        ex.extend([x[start], x[end], None])
+        ey.extend([y[start], y[end], None])
+        ez.extend([z[start], z[end], None])
+    return ex, ey, ez
+
+
+def quad_vertices(item: dict) -> tuple[list[float], list[float], list[float]] | None:
+    points = item.get("vertices") or []
+    if len(points) != 4:
+        return None
+    return (
+        [point["x"] for point in points],
+        [point["y"] for point in points],
+        [point["z"] for point in points],
+    )
+
+
+def quad_edges(item: dict) -> tuple[list[float], list[float], list[float]] | None:
+    vertices = quad_vertices(item)
+    if vertices is None:
+        return None
+    x, y, z = vertices
+    ex, ey, ez = [], [], []
+    for start, end in [(0, 1), (1, 2), (2, 3), (3, 0)]:
+        ex.extend([x[start], x[end], None])
+        ey.extend([y[start], y[end], None])
+        ez.extend([z[start], z[end], None])
+    return ex, ey, ez
+
+
 def zone_floor_index(name: str) -> int:
     if len(name) >= 3 and name[0] == "F" and name[1:3].isdigit():
         return int(name[1:3])
@@ -123,6 +171,24 @@ def render_model(
     cmin = 0.0
     has_energy = bool(zone_energy) and cmax > 0
     colorbar_shown = False
+    window_x: list[float] = []
+    window_y: list[float] = []
+    window_z: list[float] = []
+    window_i: list[int] = []
+    window_j: list[int] = []
+    window_k: list[int] = []
+    window_edge_x: list[float] = []
+    window_edge_y: list[float] = []
+    window_edge_z: list[float] = []
+    shading_x: list[float] = []
+    shading_y: list[float] = []
+    shading_z: list[float] = []
+    shading_i: list[int] = []
+    shading_j: list[int] = []
+    shading_k: list[int] = []
+    shading_edge_x: list[float] = []
+    shading_edge_y: list[float] = []
+    shading_edge_z: list[float] = []
 
     for zone in zones:
         is_reference = zone.get("category") == "open_space_reference" or zone["name"] == "site_inner_courtyard_reference"
@@ -189,6 +255,99 @@ def render_model(
                 z=ez,
                 mode="lines",
                 line=dict(color="#111827" if not is_reference else "#64748B", width=2),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+
+        for window in zone.get("windows", []):
+            vertices = quad_vertices(window)
+            if vertices is None:
+                continue
+            wx, wy, wz = vertices
+            base = len(window_x)
+            window_x.extend(wx)
+            window_y.extend(wy)
+            window_z.extend(wz)
+            window_i.extend([base, base])
+            window_j.extend([base + 1, base + 2])
+            window_k.extend([base + 2, base + 3])
+            if show_edges:
+                edges = quad_edges(window)
+                if edges is not None:
+                    ex, ey, ez = edges
+                    window_edge_x.extend(ex)
+                    window_edge_y.extend(ey)
+                    window_edge_z.extend(ez)
+
+        for shading in zone.get("shading_surfaces", []):
+            vertices = quad_vertices(shading)
+            if vertices is None:
+                continue
+            sx, sy, sz = vertices
+            base = len(shading_x)
+            shading_x.extend(sx)
+            shading_y.extend(sy)
+            shading_z.extend(sz)
+            shading_i.extend([base, base])
+            shading_j.extend([base + 1, base + 2])
+            shading_k.extend([base + 2, base + 3])
+            if show_edges:
+                edges = quad_edges(shading)
+                if edges is not None:
+                    ex, ey, ez = edges
+                    shading_edge_x.extend(ex)
+                    shading_edge_y.extend(ey)
+                    shading_edge_z.extend(ez)
+
+    if window_x:
+        fig.add_trace(go.Mesh3d(
+            x=window_x,
+            y=window_y,
+            z=window_z,
+            i=window_i,
+            j=window_j,
+            k=window_k,
+            color="#22D3EE",
+            opacity=0.92,
+            name="windows",
+            hoverinfo="skip",
+            showscale=False,
+            showlegend=True,
+        ))
+        if show_edges and window_edge_x:
+            fig.add_trace(go.Scatter3d(
+                x=window_edge_x,
+                y=window_edge_y,
+                z=window_edge_z,
+                mode="lines",
+                line=dict(color="#075985", width=1.2),
+                name="window edges",
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+    if shading_x:
+        fig.add_trace(go.Mesh3d(
+            x=shading_x,
+            y=shading_y,
+            z=shading_z,
+            i=shading_i,
+            j=shading_j,
+            k=shading_k,
+            color="#FBBF24",
+            opacity=0.72,
+            name="overhang shading",
+            hoverinfo="skip",
+            showscale=False,
+            showlegend=True,
+        ))
+        if show_edges and shading_edge_x:
+            fig.add_trace(go.Scatter3d(
+                x=shading_edge_x,
+                y=shading_edge_y,
+                z=shading_edge_z,
+                mode="lines",
+                line=dict(color="#92400E", width=1.2),
+                name="shading edges",
                 hoverinfo="skip",
                 showlegend=False,
             ))

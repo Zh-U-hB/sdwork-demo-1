@@ -121,24 +121,41 @@ with st.sidebar:
     setback_north = st.slider("setback_north", 0.0, 30.0, 10.0, 0.5)
     setback_east = st.slider("setback_east", 0.0, 30.0, 10.0, 0.5)
 
-    st.caption("Footprint aspect ratios")
-    low_aspect_ratio = st.slider("low_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
-    mid_aspect_ratio = st.slider("mid_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
-    high_aspect_ratio = st.slider("high_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
+    st.caption("Shared building controls")
+    shared_geometry_controls = st.checkbox("统一调节三栋建筑 aspect / angle / distance", value=False)
+    if shared_geometry_controls:
+        st.caption("统一模式下：低/中建筑使用该长宽比，高层建筑使用倒数，形成相反 x/y 比例。")
+        shared_aspect_ratio = st.slider("shared_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
+        shared_offset_angle = st.slider("shared_offset_angle", 0.0, 360.0, 180.0, 1.0)
+        shared_offset_distance = st.slider("shared_offset_distance", 0.0, 10.0, 2.0, 0.1)
+        low_aspect_ratio = mid_aspect_ratio = shared_aspect_ratio
+        high_aspect_ratio = 1.0 / shared_aspect_ratio
+        low_offset_angle = mid_offset_angle = high_offset_angle = shared_offset_angle
+        low_offset_distance = mid_offset_distance = high_offset_distance = shared_offset_distance
+    else:
+        shared_aspect_ratio = None
+        shared_offset_angle = None
+        shared_offset_distance = None
+
+        st.caption("Footprint aspect ratios")
+        low_aspect_ratio = st.slider("low_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
+        mid_aspect_ratio = st.slider("mid_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
+        high_aspect_ratio = st.slider("high_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
 
     st.caption("Offset grouping")
     boundary_shift = st.slider("boundary_shift", 0.0, 200.0, 40.0, 1.0)
     group_size = st.slider("group_size", 1, 4, 2)
 
-    st.caption("Offset angles (deg)")
-    low_offset_angle = st.slider("low_offset_angle", 0.0, 360.0, 45.0, 1.0)
-    mid_offset_angle = st.slider("mid_offset_angle", 0.0, 360.0, 180.0, 1.0)
-    high_offset_angle = st.slider("high_offset_angle", 0.0, 360.0, 315.0, 1.0)
+    if not shared_geometry_controls:
+        st.caption("Offset angles (deg)")
+        low_offset_angle = st.slider("low_offset_angle", 0.0, 360.0, 45.0, 1.0)
+        mid_offset_angle = st.slider("mid_offset_angle", 0.0, 360.0, 180.0, 1.0)
+        high_offset_angle = st.slider("high_offset_angle", 0.0, 360.0, 315.0, 1.0)
 
-    st.caption("Offset distances (m)")
-    low_offset_distance = st.slider("low_offset_distance", 0.0, 10.0, 2.0, 0.1)
-    mid_offset_distance = st.slider("mid_offset_distance", 0.0, 10.0, 2.0, 0.1)
-    high_offset_distance = st.slider("high_offset_distance", 0.0, 10.0, 2.0, 0.1)
+        st.caption("Offset distances (m)")
+        low_offset_distance = st.slider("low_offset_distance", 0.0, 10.0, 2.0, 0.1)
+        mid_offset_distance = st.slider("mid_offset_distance", 0.0, 10.0, 2.0, 0.1)
+        high_offset_distance = st.slider("high_offset_distance", 0.0, 10.0, 2.0, 0.1)
 
     min_support_overlap_ratio = st.slider("min_support_overlap_ratio", 0.1, 1.0, 0.5, 0.05)
     add_aerial_platforms = st.checkbox("add_aerial_platforms", value=True)
@@ -268,14 +285,17 @@ current_params = dict(
     setback_west=float(setback_west),
     setback_north=float(setback_north),
     setback_east=float(setback_east),
+    shared_aspect_ratio=float(shared_aspect_ratio) if shared_aspect_ratio is not None else None,
     low_aspect_ratio=float(low_aspect_ratio),
     mid_aspect_ratio=float(mid_aspect_ratio),
     high_aspect_ratio=float(high_aspect_ratio),
     boundary_shift=float(boundary_shift),
     group_size=int(group_size),
+    shared_offset_angle=float(shared_offset_angle) if shared_offset_angle is not None else None,
     low_offset_angle=float(low_offset_angle),
     mid_offset_angle=float(mid_offset_angle),
     high_offset_angle=float(high_offset_angle),
+    shared_offset_distance=float(shared_offset_distance) if shared_offset_distance is not None else None,
     low_offset_distance=float(low_offset_distance),
     mid_offset_distance=float(mid_offset_distance),
     high_offset_distance=float(high_offset_distance),
@@ -637,223 +657,3 @@ with tab_ga:
                 )
             except Exception as e:
                 st.error(f"生成最优模型失败：{e}")
-
-
-# ---------------------------------------------------------------------------
-# Tab 4: GA + LLM hybrid optimization
-# ---------------------------------------------------------------------------
-
-with tab_hybrid:
-    st.subheader("GA + LLM 混合优化")
-    st.caption(
-        "遗传算法搜索参数空间，LLM 分析中间结果并缩窄范围；"
-        "几何固定为左侧边栏当前值的可调子集 + EnergyPlus 可调项。"
-    )
-
-    preset = st.radio(
-        "运行预设",
-        options=["smoke", "standard", "custom"],
-        format_func=lambda x: {
-            "smoke": "快速冒烟（2 个体 × 1 代 × 1 轮，无 Morris）",
-            "standard": "标准（10 个体 × 6 代 × 2 轮）",
-            "custom": "自定义",
-        }[x],
-        horizontal=True,
-        key="mt_hybrid_preset",
-    )
-
-    if preset == "smoke":
-        h_pop, h_gen, h_rounds = 2, 1, 1
-        h_debug, h_morris, h_llm = True, False, True
-    elif preset == "standard":
-        h_pop, h_gen, h_rounds = 10, 6, 2
-        h_debug, h_morris, h_llm = False, False, True
-    else:
-        h_pop = h_gen = h_rounds = h_debug = h_morris = h_llm = None
-
-    cfg1, cfg2, cfg3 = st.columns(3)
-    with cfg1:
-        hybrid_pop = st.number_input(
-            "种群大小",
-            value=h_pop if h_pop is not None else 10,
-            min_value=2,
-            max_value=50,
-            step=1,
-            disabled=preset != "custom",
-        )
-        hybrid_gen = st.number_input(
-            "每轮最大代数",
-            value=h_gen if h_gen is not None else 6,
-            min_value=1,
-            max_value=100,
-            step=1,
-            disabled=preset != "custom",
-        )
-    with cfg2:
-        hybrid_rounds = st.number_input(
-            "混合轮次",
-            value=h_rounds if h_rounds is not None else 2,
-            min_value=1,
-            max_value=10,
-            step=1,
-            disabled=preset != "custom",
-        )
-        hybrid_seed = st.number_input("随机种子", value=42, step=1)
-    with cfg3:
-        hybrid_llm = st.checkbox(
-            "启用 LLM 分析",
-            value=h_llm if h_llm is not None else True,
-        )
-        hybrid_morris = st.checkbox(
-            "启用 Morris 敏感性",
-            value=h_morris if h_morris is not None else False,
-        )
-        hybrid_ep_tunables = st.checkbox("优化 EP 参数（窗墙比/照明）", value=True)
-        hybrid_debug = st.checkbox(
-            "Debug 模式（自动缩小规模）",
-            value=h_debug if h_debug is not None else False,
-        )
-
-    est_evals = int(hybrid_pop) * (int(hybrid_gen) + 1) * int(hybrid_rounds)
-    st.info(
-        f"预计 EnergyPlus 仿真约 **{est_evals}** 次"
-        f"（每轮 Morris 另加约 {6 * 7 if hybrid_morris else 0} 次）。"
-        " 每次约 20–30 秒，请耐心等待。"
-    )
-
-    run_hybrid_cols = st.columns([1, 1, 2])
-    start_hybrid = run_hybrid_cols[0].button(
-        "▶ 一键启动 GA+LLM 混合优化",
-        type="primary",
-        use_container_width=True,
-        disabled=st.session_state.mt_hybrid_running,
-    )
-    if run_hybrid_cols[1].button("清除结果", use_container_width=True):
-        st.session_state.mt_hybrid_report = None
-        st.session_state.mt_hybrid_output_dir = None
-        st.session_state.mt_hybrid_running = False
-        st.rerun()
-
-    if start_hybrid:
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        st.session_state.mt_hybrid_output_dir = (
-            f"output/ga_llm_hybrid/ui_{ts}_{time.time_ns() % 1_000_000_000:09d}"
-        )
-        st.session_state.mt_hybrid_report = None
-        st.session_state.mt_hybrid_running = True
-        st.rerun()
-
-    if st.session_state.mt_hybrid_running:
-        out_dir = st.session_state.mt_hybrid_output_dir or "output/ga_llm_hybrid/ui_unknown"
-        st.caption(f"输出目录：`{out_dir}`")
-        config = build_config_from_manual_params(
-            current_params,
-            population_size=int(hybrid_pop),
-            max_generations=int(hybrid_gen),
-            max_rounds=int(hybrid_rounds),
-            debug_mode=bool(hybrid_debug),
-            llm_enabled=bool(hybrid_llm),
-            morris_enabled=bool(hybrid_morris),
-            partition_enabled=bool(partition_enabled),
-            perimeter_depth=float(perimeter_depth),
-            seed=int(hybrid_seed),
-            include_ep_tunables=bool(hybrid_ep_tunables),
-        )
-        progress = st.progress(0.0, text="混合优化运行中…")
-        status = st.empty()
-        try:
-            status.info("正在执行 GA 搜索与 EnergyPlus 模拟，请勿关闭页面…")
-            orch = HybridOrchestrator(config, out_dir)
-            report = orch.run()
-            st.session_state.mt_hybrid_report = report
-            progress.progress(1.0, text="完成")
-            status.success("混合优化完成。")
-        except Exception as exc:
-            st.session_state.mt_hybrid_report = {"error": str(exc)}
-            status.error(f"运行失败：{exc}")
-        finally:
-            st.session_state.mt_hybrid_running = False
-        st.rerun()
-
-    report = st.session_state.mt_hybrid_report
-    out_dir = st.session_state.mt_hybrid_output_dir
-    if not report:
-        st.info("选择预设后点击「一键启动 GA+LLM 混合优化」。")
-    elif report.get("error"):
-        st.error(report["error"])
-    else:
-        best = report.get("best", {})
-        mcols = st.columns(4)
-        mcols[0].metric("混合轮次", report.get("total_rounds", "—"))
-        mcols[1].metric("Pareto 规模", report.get("pareto_size", "—"))
-        mcols[2].metric(
-            "最优 EUI",
-            f"{best.get('fitness', 0):.1f} MJ/m²" if best.get("fitness") else "N/A",
-        )
-        mcols[3].metric("输出目录", "已生成" if out_dir else "—")
-
-        if out_dir:
-            st.caption(f"`{out_dir}`")
-            final_path = Path(out_dir) / "final_report.json"
-            if final_path.exists():
-                with st.expander("final_report.json"):
-                    st.json(json.loads(final_path.read_text(encoding="utf-8")))
-
-            pop_csv = Path(out_dir) / "round_01" / "population.csv"
-            if pop_csv.exists():
-                import pandas as pd
-
-                df = pd.read_csv(pop_csv)
-                if "eui_mj_m2" in df.columns and "generation" in df.columns:
-                    fig_h = go.Figure()
-                    for gen in sorted(df["generation"].unique()):
-                        sub = df[df["generation"] == gen]
-                        fig_h.add_trace(go.Scatter(
-                            x=sub["individual_id"],
-                            y=sub["eui_mj_m2"],
-                            mode="markers",
-                            name=f"gen {gen}",
-                        ))
-                    fig_h.update_layout(
-                        height=280,
-                        xaxis_title="individual_id",
-                        yaxis_title="EUI (MJ/m²)",
-                    )
-                    st.plotly_chart(fig_h, use_container_width=True, key="mt_hybrid_eui_scatter")
-
-                st.subheader("种群结果（round_01）")
-                st.dataframe(df, hide_index=True, use_container_width=True)
-
-            llm_json = Path(out_dir) / "round_01" / "llm_analysis.json"
-            if llm_json.exists():
-                with st.expander("LLM 分析 (round_01)"):
-                    content = llm_json.read_text(encoding="utf-8").strip()
-                    if content and content != "{}":
-                        st.json(json.loads(content))
-                    else:
-                        st.warning("LLM 分析为空或解析失败，可查看同目录 llm_response.txt。")
-
-        if best.get("params"):
-            st.subheader("最优参数")
-            st.json(best["params"])
-            try:
-                best_params = dict(current_params)
-                best_params.update(best["params"])
-                raw_best = generate_20260528(**best_params)
-                show_model = raw_best
-                if partition_enabled:
-                    show_model = partition_model_by_floor(
-                        raw_best,
-                        perimeter_depth=float(perimeter_depth),
-                        lobby_height=float(best_params.get("lobby_height", 6.0)),
-                        floor_height=float(best_params.get("floor_height", 4.0)),
-                    )
-                st.subheader("最优方案 3D")
-                st.plotly_chart(
-                    render_model(show_model, site_size, show_edges, opacity),
-                    use_container_width=True,
-                    key="mt_hybrid_best_model_3d",
-                )
-            except Exception as e:
-                st.warning(f"无法渲染最优 3D 模型：{e}")
-

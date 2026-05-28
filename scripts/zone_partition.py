@@ -199,6 +199,74 @@ def rect_polygon(rect: Rect) -> list[tuple[float, float]]:
     return [(rect.x0, rect.y0), (rect.x1, rect.y0), (rect.x1, rect.y1), (rect.x0, rect.y1)]
 
 
+def point_on_segment(px: float, py: float, a: tuple[float, float], b: tuple[float, float], tol: float = 0.02) -> bool:
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq <= EPS:
+        return math.hypot(px - ax, py - ay) <= tol
+    t = ((px - ax) * dx + (py - ay) * dy) / length_sq
+    if t < -tol or t > 1 + tol:
+        return False
+    qx, qy = ax + t * dx, ay + t * dy
+    return math.hypot(px - qx, py - qy) <= tol
+
+
+def window_matches_part(window: dict, polygon: list[tuple[float, float]], z: float, height: float) -> bool:
+    center = window.get("center") or {}
+    cx = float(center.get("x", 0.0))
+    cy = float(center.get("y", 0.0))
+    cz = float(center.get("z", z + height / 2))
+    if not (z - EPS <= cz <= z + height + EPS):
+        return False
+    for idx, point in enumerate(polygon):
+        nxt = polygon[(idx + 1) % len(polygon)]
+        if point_on_segment(cx, cy, point, nxt):
+            return True
+    return False
+
+
+def windows_for_part(source_zone: dict | None, part: ZonePart, z: float, height: float) -> list[dict]:
+    if source_zone is None or part.category == "interior_zone":
+        return []
+    return [
+        window
+        for window in source_zone.get("windows", [])
+        if window_matches_part(window, part.polygon, z, height)
+    ]
+
+
+def shading_matches_part(shading: dict, part: ZonePart, z: float, height: float, floor_index: int) -> bool:
+    if int(shading.get("floor", -1)) != floor_index:
+        return False
+    center = shading.get("center") or {}
+    cz = float(center.get("z", z + height))
+    if not (z - EPS <= cz <= z + height + EPS):
+        return False
+    exposure_faces = {item.removesuffix("_wall") for item in part.exposure if item.endswith("_wall")}
+    face = shading.get("face")
+    if exposure_faces and face not in exposure_faces:
+        return False
+    cx = float(center.get("x", 0.0))
+    cy = float(center.get("y", 0.0))
+    for idx, point in enumerate(part.polygon):
+        nxt = part.polygon[(idx + 1) % len(part.polygon)]
+        if point_on_segment(cx, cy, point, nxt, tol=0.75):
+            return True
+    return bool(exposure_faces and face in exposure_faces)
+
+
+def shading_for_part(source_zone: dict | None, part: ZonePart, z: float, height: float, floor_index: int) -> list[dict]:
+    if source_zone is None or part.category == "interior_zone":
+        return []
+    return [
+        shading
+        for shading in source_zone.get("shading_surfaces", [])
+        if shading_matches_part(shading, part, z, height, floor_index)
+    ]
+
+
 def side_band_polygon(rect: Rect, side: str, segment: tuple[float, float], depth: float) -> list[tuple[float, float]]:
     d = min(depth, (rect.x1 - rect.x0) / 2.0, (rect.y1 - rect.y0) / 2.0)
     s0, s1 = segment
@@ -549,9 +617,13 @@ def partition_model_by_floor(
     plates = expand_mass_to_floor_plates(model, lobby_height, floor_height)
     out_zones: list[dict] = []
     partition_counts: dict[str, int] = {}
+    source_zones = {zone.get("name"): zone for zone in model.get("zones", [])}
 
     for plate in plates:
         parts = classify_plate(plate, plates, perimeter_depth)
+        source_zone = source_zones.get(plate.source_zone)
+        assigned_window_names: set[str] = set()
+        assigned_shading_names: set[str] = set()
         for index, part in enumerate(parts, start=1):
             partition_counts[part.category] = partition_counts.get(part.category, 0) + 1
             exposure_tag = "_".join(part.exposure) if part.exposure else "core"
@@ -570,6 +642,22 @@ def partition_model_by_floor(
                     "perimeter_depth": perimeter_depth,
                 },
             )
+            inherited = [
+                window
+                for window in windows_for_part(source_zone, part, plate.z, plate.height)
+                if window.get("name") not in assigned_window_names
+            ]
+            if inherited:
+                out_zones[-1]["windows"] = inherited
+                assigned_window_names.update(window.get("name", "") for window in inherited)
+            inherited_shading = [
+                shading
+                for shading in shading_for_part(source_zone, part, plate.z, plate.height, plate.floor_index)
+                if shading.get("name") not in assigned_shading_names
+            ]
+            if inherited_shading:
+                out_zones[-1]["shading_surfaces"] = inherited_shading
+                assigned_shading_names.update(shading.get("name", "") for shading in inherited_shading)
 
     for zone in model["zones"]:
         if zone.get("category") == "aerial_platform":
@@ -585,6 +673,8 @@ def partition_model_by_floor(
                     "exposure": ["bridge"],
                 },
             )
+            if zone.get("windows"):
+                out_zones[-1]["windows"] = zone["windows"]
 
     return {
         "building_name": f"{model.get('building_name', 'Building')} Partitioned",
@@ -600,6 +690,8 @@ def partition_model_by_floor(
                 "partition_zone_count": len(out_zones),
                 "counts": partition_counts,
                 "note": "Axis-aligned rectangular partitioner; aerial platforms are preserved as independent prism zones.",
+                "window_transfer": "Perimeter and horizontal-exposed zones inherit source windows whose centers lie on the partition polygon boundary; interior zones receive no exterior windows.",
+                "shading_transfer": "Perimeter and horizontal-exposed zones inherit source overhang shading surfaces by matching floor height and exposed face; interior zones receive no overhangs.",
             },
         },
     }

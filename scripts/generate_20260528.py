@@ -18,6 +18,10 @@ from pathlib import Path
 EPS = 1e-6
 
 
+def point3(x: float, y: float, z: float) -> dict:
+    return {"x": round(x, 3), "y": round(y, 3), "z": round(z, 3)}
+
+
 def add_zone(
     zones: list[dict],
     name: str,
@@ -88,6 +92,264 @@ def add_prism_zone(
     })
 
 
+def module_lengths(total_length: float, module: float) -> list[float]:
+    if total_length <= EPS or module <= EPS:
+        return []
+    if total_length <= module:
+        return [total_length]
+    count = max(1, int(total_length // module))
+    remainder = total_length - count * module
+    lengths = [module] * count
+    if remainder > EPS:
+        if count == 1:
+            lengths[0] += remainder
+        else:
+            lengths[0] += remainder / 2
+            lengths[-1] += remainder / 2
+    return lengths
+
+
+def window_vertices_on_segment(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    z0: float,
+    z1: float,
+    wwr: float,
+) -> list[dict] | None:
+    sx, sy = start
+    ex, ey = end
+    dx, dy = ex - sx, ey - sy
+    seg_len = math.hypot(dx, dy)
+    height = z1 - z0
+    if seg_len <= EPS or height <= EPS or wwr <= 0:
+        return None
+    scale = math.sqrt(clamp(wwr, 0.0, 1.0))
+    win_len = seg_len * scale
+    win_h = height * scale
+    margin_len = (seg_len - win_len) / 2
+    margin_h = (height - win_h) / 2
+    ux, uy = dx / seg_len, dy / seg_len
+    x0 = sx + ux * margin_len
+    y0 = sy + uy * margin_len
+    x1 = sx + ux * (margin_len + win_len)
+    y1 = sy + uy * (margin_len + win_len)
+    wz0 = z0 + margin_h
+    wz1 = wz0 + win_h
+    return [
+        point3(x0, y0, wz0),
+        point3(x1, y1, wz0),
+        point3(x1, y1, wz1),
+        point3(x0, y0, wz1),
+    ]
+
+
+def split_edge_by_module(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    module: float,
+) -> list[tuple[tuple[float, float], tuple[float, float], float]]:
+    x0, y0 = p0
+    x1, y1 = p1
+    edge_len = math.hypot(x1 - x0, y1 - y0)
+    lengths = module_lengths(edge_len, module)
+    if edge_len <= EPS or not lengths:
+        return []
+    ux, uy = (x1 - x0) / edge_len, (y1 - y0) / edge_len
+    segments = []
+    dist = 0.0
+    for length in lengths:
+        s = (x0 + ux * dist, y0 + uy * dist)
+        e = (x0 + ux * (dist + length), y0 + uy * (dist + length))
+        segments.append((s, e, length))
+        dist += length
+    return segments
+
+
+def window_module_for_floor(floor_index: int, default_module: float) -> float:
+    if floor_index <= 2:
+        return 2.0
+    if floor_index <= 4:
+        return 1.5
+    if floor_index >= 5:
+        return 1.0
+    return default_module
+
+
+def zone_floor_ranges(zone: dict, lobby_height: float, floor_height: float) -> list[tuple[int, float, float]]:
+    z0 = zone["origin"]["z"]
+    z1 = z0 + zone["dimensions"]["height"]
+    ranges = []
+    floor_index = 1
+    bottom = 0.0
+    while bottom < z1 - EPS:
+        height = lobby_height if floor_index == 1 else floor_height
+        top = bottom + height
+        overlap = min(z1, top) - max(z0, bottom)
+        if overlap > EPS:
+            ranges.append((floor_index, max(z0, bottom), min(z1, top)))
+        floor_index += 1
+        bottom = top
+    return ranges
+
+
+def face_edges_from_zone(zone: dict) -> list[tuple[str, tuple[float, float], tuple[float, float]]]:
+    bottom = (zone.get("points") or [])[:4]
+    if len(bottom) >= 4:
+        edges = []
+        labels = ["south", "east", "north", "west"]
+        for idx, label in enumerate(labels):
+            p0 = bottom[idx]
+            p1 = bottom[(idx + 1) % 4]
+            edges.append((label, (float(p0["x"]), float(p0["y"])), (float(p1["x"]), float(p1["y"]))))
+        return edges
+    origin = zone["origin"]
+    dims = zone["dimensions"]
+    x0, y0 = origin["x"], origin["y"]
+    x1, y1 = x0 + dims["length"], y0 + dims["width"]
+    return [
+        ("south", (x0, y0), (x1, y0)),
+        ("east", (x1, y0), (x1, y1)),
+        ("north", (x1, y1), (x0, y1)),
+        ("west", (x0, y1), (x0, y0)),
+    ]
+
+
+def add_zone_windows(
+    zone: dict,
+    *,
+    wwr: float,
+    module: float,
+    lobby_height: float,
+    floor_height: float,
+) -> None:
+    if wwr <= 0 or module <= 0 or zone.get("category") == "open_space_reference":
+        return
+    windows = []
+    for floor_index, z0, z1 in zone_floor_ranges(zone, lobby_height, floor_height):
+        floor_module = window_module_for_floor(floor_index, module)
+        for face, p0, p1 in face_edges_from_zone(zone):
+            for segment_index, (s, e, seg_len) in enumerate(split_edge_by_module(p0, p1, floor_module), start=1):
+                vertices = window_vertices_on_segment(s, e, z0, z1, wwr)
+                if not vertices:
+                    continue
+                cx = sum(point["x"] for point in vertices) / 4
+                cy = sum(point["y"] for point in vertices) / 4
+                cz = sum(point["z"] for point in vertices) / 4
+                windows.append({
+                    "name": f"{zone['name']}_F{floor_index:02d}_{face}_W{segment_index:03d}",
+                    "face": face,
+                    "floor": floor_index,
+                    "segment_index": segment_index,
+                    "module_length": round(seg_len, 3),
+                    "module_rule": round(floor_module, 3),
+                    "wwr": round(wwr, 3),
+                    "center": point3(cx, cy, cz),
+                    "vertices": vertices,
+                })
+    if windows:
+        zone["windows"] = windows
+
+
+def add_windows_to_zones(
+    zones: list[dict],
+    *,
+    enabled: bool,
+    wwr: float,
+    module: float,
+    lobby_height: float,
+    floor_height: float,
+) -> None:
+    if not enabled:
+        return
+    for zone in zones:
+        if zone.get("category") in {"mass_block", "aerial_platform"}:
+            add_zone_windows(
+                zone,
+                wwr=wwr,
+                module=module,
+                lobby_height=lobby_height,
+                floor_height=floor_height,
+            )
+
+
+def outward_vector_for_face(face: str) -> tuple[float, float]:
+    return {
+        "south": (0.0, -1.0),
+        "east": (1.0, 0.0),
+        "north": (0.0, 1.0),
+        "west": (-1.0, 0.0),
+    }[face]
+
+
+def overhang_surface_on_edge(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    z: float,
+    face: str,
+    depth: float,
+) -> list[dict] | None:
+    if depth <= 0 or math.dist(p0, p1) <= EPS:
+        return None
+    ox, oy = outward_vector_for_face(face)
+    p0o = (p0[0] + ox * depth, p0[1] + oy * depth)
+    p1o = (p1[0] + ox * depth, p1[1] + oy * depth)
+    return [
+        point3(p0[0], p0[1], z),
+        point3(p1[0], p1[1], z),
+        point3(p1o[0], p1o[1], z),
+        point3(p0o[0], p0o[1], z),
+    ]
+
+
+def add_zone_shading(
+    zone: dict,
+    *,
+    depth: float,
+    lobby_height: float,
+    floor_height: float,
+) -> None:
+    if depth <= 0 or zone.get("category") != "mass_block":
+        return
+    surfaces = []
+    for floor_index, _, z_top in zone_floor_ranges(zone, lobby_height, floor_height):
+        for face, p0, p1 in face_edges_from_zone(zone):
+            vertices = overhang_surface_on_edge(p0, p1, z_top, face, depth)
+            if not vertices:
+                continue
+            cx = sum(point["x"] for point in vertices) / 4
+            cy = sum(point["y"] for point in vertices) / 4
+            surfaces.append({
+                "name": f"{zone['name']}_F{floor_index:02d}_{face}_shade",
+                "type": "overhang",
+                "face": face,
+                "floor": floor_index,
+                "depth": round(depth, 3),
+                "center": point3(cx, cy, z_top),
+                "vertices": vertices,
+            })
+    if surfaces:
+        zone["shading_surfaces"] = surfaces
+
+
+def add_shading_to_zones(
+    zones: list[dict],
+    *,
+    enabled: bool,
+    depth: float,
+    lobby_height: float,
+    floor_height: float,
+) -> None:
+    if not enabled:
+        return
+    for zone in zones:
+        add_zone_shading(
+            zone,
+            depth=depth,
+            lobby_height=lobby_height,
+            floor_height=floor_height,
+        )
+
+
 def clamp(value: float, low: float, high: float) -> float:
     return min(max(value, low), high)
 
@@ -127,6 +389,13 @@ def offset_xy(angle_degrees: float, distance: float, group_index: int) -> tuple[
     angle = math.radians(angle_degrees)
     scale = distance * group_index
     return math.cos(angle) * scale, math.sin(angle) * scale
+
+
+def grouped_offset_xy(floors: int, angle_degrees: float, distance: float, group_index: int) -> tuple[float, float]:
+    if floors >= 5 and group_index == 2:
+        angle = math.radians(angle_degrees)
+        return -math.cos(angle) * distance, -math.sin(angle) * distance
+    return offset_xy(angle_degrees, distance, group_index)
 
 
 def boundary_point(
@@ -176,7 +445,7 @@ def place_on_boundary(
 
 def offset_bounds(floors: int, group_size: int, offset_angle: float, offset_distance: float) -> tuple[float, float, float, float]:
     offsets = [
-        offset_xy(offset_angle, offset_distance, group_index)
+        grouped_offset_xy(floors, offset_angle, offset_distance, group_index)
         for group_index, _ in enumerate(grouped_floors(floors, group_size))
     ]
     dxs = [dx for dx, _ in offsets]
@@ -476,7 +745,7 @@ def make_building_groups(
     offset_distance: float,
 ) -> None:
     for group_index, (start_floor, floor_count) in enumerate(grouped_floors(floors, group_size)):
-        dx, dy = offset_xy(offset_angle, offset_distance, group_index)
+        dx, dy = grouped_offset_xy(floors, offset_angle, offset_distance, group_index)
         add_zone(
             zones,
             f"{name}_G{group_index + 1:02d}_F{start_floor:02d}_to_F{start_floor + floor_count - 1:02d}",
@@ -501,14 +770,17 @@ def generate_20260528(
     setback_west: float = 15.0,
     setback_north: float = 10.0,
     setback_east: float = 10.0,
+    shared_aspect_ratio: float | None = None,
     low_aspect_ratio: float = 1.0,
     mid_aspect_ratio: float = 1.0,
     high_aspect_ratio: float = 1.0,
     boundary_shift: float = 40.0,
     group_size: int = 2,
+    shared_offset_angle: float | None = None,
     low_offset_angle: float = 45.0,
     mid_offset_angle: float = 180.0,
     high_offset_angle: float = 315.0,
+    shared_offset_distance: float | None = None,
     low_offset_distance: float = 2.0,
     mid_offset_distance: float = 2.0,
     high_offset_distance: float = 2.0,
@@ -516,6 +788,11 @@ def generate_20260528(
     add_aerial_platforms: bool = True,
     platform_edge_walk_distance: float = 5.0,
     add_open_space_markers: bool = True,
+    window_enabled: bool = True,
+    window_wwr: float = 0.4,
+    window_module: float = 1.0,
+    shading_enabled: bool = True,
+    shading_depth: float = 0.5,
 ) -> dict:
     if site_size <= 0:
         raise ValueError("site_size must be positive")
@@ -525,6 +802,21 @@ def generate_20260528(
         raise ValueError("group_size must be at least 1")
     if platform_edge_walk_distance <= 0:
         raise ValueError("platform_edge_walk_distance must be positive")
+    if not 0.0 <= window_wwr <= 1.0:
+        raise ValueError("window_wwr must be between 0 and 1")
+    if window_module <= 0:
+        raise ValueError("window_module must be positive")
+    if shading_depth < 0:
+        raise ValueError("shading_depth must be non-negative")
+    if shared_aspect_ratio is not None:
+        if shared_aspect_ratio <= 0:
+            raise ValueError("shared_aspect_ratio must be positive")
+        low_aspect_ratio = mid_aspect_ratio = shared_aspect_ratio
+        high_aspect_ratio = 1.0 / shared_aspect_ratio
+    if shared_offset_angle is not None:
+        low_offset_angle = mid_offset_angle = high_offset_angle = shared_offset_angle
+    if shared_offset_distance is not None:
+        low_offset_distance = mid_offset_distance = high_offset_distance = shared_offset_distance
 
     buildings = [
         ("low_block", 4, 1.2, low_aspect_ratio, low_offset_angle, low_offset_distance),
@@ -598,6 +890,7 @@ def generate_20260528(
             "base_origin": {"x": round(x, 3), "y": round(y, 3)},
             "offset_angle": offset_angle,
             "offset_distance": offset_distance,
+            "offset_rule": "For 5/6-floor buildings, group 3 is offset opposite to group 2 by twice the group-to-group distance, ending one distance opposite from group 1.",
         })
 
     validate_setbacks(zones, x_min, y_min, x_max, y_max)
@@ -628,6 +921,22 @@ def generate_20260528(
         ))
         validate_setbacks(zones, x_min, y_min, x_max, y_max)
         validate_platform_attachments(zones)
+
+    add_windows_to_zones(
+        zones,
+        enabled=window_enabled,
+        wwr=window_wwr,
+        module=window_module,
+        lobby_height=lobby_height,
+        floor_height=floor_height,
+    )
+    add_shading_to_zones(
+        zones,
+        enabled=shading_enabled,
+        depth=shading_depth,
+        lobby_height=lobby_height,
+        floor_height=floor_height,
+    )
 
     if add_open_space_markers:
         add_zone(
@@ -662,9 +971,32 @@ def generate_20260528(
             },
             "boundary_shift": boundary_shift,
             "boundary_spacing": spacing,
+            "shared_geometry_controls": {
+                "aspect_ratio": shared_aspect_ratio,
+                "high_aspect_ratio_rule": "inverse_of_shared_aspect_ratio",
+                "offset_angle": shared_offset_angle,
+                "offset_distance": shared_offset_distance,
+                "enabled": any(value is not None for value in (shared_aspect_ratio, shared_offset_angle, shared_offset_distance)),
+            },
             "group_size": group_size,
             "min_support_overlap_ratio": min_support_overlap_ratio,
             "platform_edge_walk_distance": platform_edge_walk_distance,
+            "windows": {
+                "enabled": window_enabled,
+                "wwr": window_wwr,
+                "module": window_module,
+                "module_by_floor": {
+                    "F01-F02": 2.0,
+                    "F03-F04": 1.5,
+                    "F05+": 1.0,
+                },
+                "generation_rule": "Each vertical face is split by floor-specific module length; remainder is distributed to the two end modules. Each module receives one centered window scaled by sqrt(wwr).",
+            },
+            "shading": {
+                "enabled": shading_enabled,
+                "depth": shading_depth,
+                "generation_rule": "Each non-platform building floor receives four horizontal overhang surfaces at the floor top, protruding outward by the same depth.",
+            },
             "buildings": building_metadata,
             "aerial_platforms": platform_metadata,
         },
@@ -702,14 +1034,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--setback-west", type=float, default=15.0)
     parser.add_argument("--setback-north", type=float, default=10.0)
     parser.add_argument("--setback-east", type=float, default=10.0)
+    parser.add_argument("--shared-aspect-ratio", type=float, default=None)
     parser.add_argument("--low-aspect-ratio", type=float, default=1.0)
     parser.add_argument("--mid-aspect-ratio", type=float, default=1.0)
     parser.add_argument("--high-aspect-ratio", type=float, default=1.0)
     parser.add_argument("--boundary-shift", type=float, default=40.0)
     parser.add_argument("--group-size", type=int, default=2)
+    parser.add_argument("--shared-offset-angle", type=float, default=None)
     parser.add_argument("--low-offset-angle", type=float, default=45.0)
     parser.add_argument("--mid-offset-angle", type=float, default=180.0)
     parser.add_argument("--high-offset-angle", type=float, default=315.0)
+    parser.add_argument("--shared-offset-distance", type=float, default=None)
     parser.add_argument("--low-offset-distance", type=float, default=2.0)
     parser.add_argument("--mid-offset-distance", type=float, default=2.0)
     parser.add_argument("--high-offset-distance", type=float, default=2.0)
@@ -717,6 +1052,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-aerial-platforms", action="store_true")
     parser.add_argument("--platform-edge-walk-distance", type=float, default=5.0)
     parser.add_argument("--no-open-space-markers", action="store_true")
+    parser.add_argument("--no-windows", action="store_true")
+    parser.add_argument("--window-wwr", type=float, default=0.4)
+    parser.add_argument("--window-module", type=float, default=1.0)
+    parser.add_argument("--no-shading", action="store_true")
+    parser.add_argument("--shading-depth", type=float, default=0.5)
     return parser.parse_args()
 
 
@@ -732,14 +1072,17 @@ def main() -> None:
         setback_west=args.setback_west,
         setback_north=args.setback_north,
         setback_east=args.setback_east,
+        shared_aspect_ratio=args.shared_aspect_ratio,
         low_aspect_ratio=args.low_aspect_ratio,
         mid_aspect_ratio=args.mid_aspect_ratio,
         high_aspect_ratio=args.high_aspect_ratio,
         boundary_shift=args.boundary_shift,
         group_size=args.group_size,
+        shared_offset_angle=args.shared_offset_angle,
         low_offset_angle=args.low_offset_angle,
         mid_offset_angle=args.mid_offset_angle,
         high_offset_angle=args.high_offset_angle,
+        shared_offset_distance=args.shared_offset_distance,
         low_offset_distance=args.low_offset_distance,
         mid_offset_distance=args.mid_offset_distance,
         high_offset_distance=args.high_offset_distance,
@@ -747,6 +1090,11 @@ def main() -> None:
         add_aerial_platforms=not args.no_aerial_platforms,
         platform_edge_walk_distance=args.platform_edge_walk_distance,
         add_open_space_markers=not args.no_open_space_markers,
+        window_enabled=not args.no_windows,
+        window_wwr=args.window_wwr,
+        window_module=args.window_module,
+        shading_enabled=not args.no_shading,
+        shading_depth=args.shading_depth,
     )
 
     output = Path(args.output)
