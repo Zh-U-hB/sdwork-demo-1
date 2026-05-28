@@ -150,6 +150,7 @@ def run_ep_simulation_direct(
     building_name: str | None = None,
     defaults=None,
     output_base: str | Path = "output/direct_energyplus",
+    run_id: str | None = None,
     weather_file: str | Path | None = None,
 ) -> str | None:
     """Convert *model_dict* to IDF programmatically and run EnergyPlus directly.
@@ -190,8 +191,13 @@ def run_ep_simulation_direct(
         # Inject override into a shallow copy so we don't mutate the caller's dict
         model_dict = {**model_dict, "building_name": building_name}
 
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(output_base) / f"run_{timestamp}"
+    if run_id:
+        output_dir = Path(output_base) / run_id
+    else:
+        # Use a high-resolution suffix to avoid collisions in fast loops (e.g. GA).
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        ns = time.time_ns() % 1_000_000_000
+        output_dir = Path(output_base) / f"run_{timestamp}_{ns:09d}"
 
     try:
         return convert_and_run(

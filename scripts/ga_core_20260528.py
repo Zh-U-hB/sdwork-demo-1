@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generator
@@ -66,6 +67,23 @@ class GAConfig:
     tournament_size: int = 3
     cache_path: str = "output/ga20260528_cache.json"
     checkpoint_path: str = "output/ga20260528_checkpoint.json"
+    # GA run output organization:
+    # - each GA run gets a directory under run_root (unless run_dir is provided)
+    # - each simulation evaluation is written under <run_dir>/sims/<eval_id>/
+    run_dir: str | None = None
+    run_root: str = "output/ga_runs"
+
+
+def _ensure_run_dir(config: GAConfig) -> Path:
+    if config.run_dir:
+        p = Path(config.run_dir)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    ns = time.time_ns() % 1_000_000_000
+    p = Path(config.run_root) / f"ga_{ts}_{ns:09d}"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _clamp(value: float, spec: GeneSpec) -> float:
@@ -150,6 +168,7 @@ def evaluate_fitness(
     cache: dict[str, float],
     *,
     fixed_params: dict,
+    sims_dir: Path,
 ) -> tuple[float, dict | None]:
     """Return (EUI, model_dict). model_dict is None if evaluation failed."""
     full_params = {**fixed_params, **individual}
@@ -168,7 +187,13 @@ def evaluate_fitness(
         return PENALTY, None
 
     try:
-        result_dir = run_ep_simulation(model, full_params.get("building_name", "GA_20260528"))
+        eval_id = f"eval_{key[:12]}"
+        result_dir = run_ep_simulation(
+            model,
+            full_params.get("building_name", "GA_20260528"),
+            output_base=sims_dir,
+            run_id=eval_id,
+        )
     except Exception:
         cache[key] = PENALTY
         return PENALTY, model
@@ -214,6 +239,33 @@ def run_ga(
     if seed is not None:
         random.seed(seed)
     genes = genes or DEFAULT_GENES_20260528
+
+    run_dir = _ensure_run_dir(config)
+    sims_dir = run_dir / "sims"
+    sims_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write GA run metadata once per execution
+    meta = {
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "pop_size": int(config.pop_size),
+        "n_gen": int(config.n_gen),
+        "mutation_rate": float(config.mutation_rate),
+        "mutation_sigma": float(config.mutation_sigma),
+        "crossover_alpha": float(config.crossover_alpha),
+        "elite_count": int(config.elite_count),
+        "tournament_size": int(config.tournament_size),
+        "seed": int(seed) if seed is not None else None,
+        "batch_size": int(config.pop_size),
+        "gene_count": len(genes),
+    }
+    (run_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+
+    # If caller didn't override, keep cache/checkpoint inside this GA run dir
+    if config.cache_path == "output/ga20260528_cache.json":
+        config.cache_path = str(run_dir / "ga_cache.json")
+    if config.checkpoint_path == "output/ga20260528_checkpoint.json":
+        config.checkpoint_path = str(run_dir / "checkpoint.json")
+
     cache = _load_cache(config.cache_path)
 
     population = [random_individual(genes) for _ in range(config.pop_size)]
@@ -221,7 +273,7 @@ def run_ga(
     best_model = None
 
     for i, ind in enumerate(population):
-        fit, model = evaluate_fitness(ind, cache, fixed_params=fixed_params)
+        fit, model = evaluate_fitness(ind, cache, fixed_params=fixed_params, sims_dir=sims_dir)
         fitness[i] = fit
         if fit < PENALTY and model is not None:
             best_model = model
@@ -259,7 +311,7 @@ def run_ga(
         best_model = None
         best_gen_fitness = PENALTY
         for i, ind in enumerate(population):
-            fit, model = evaluate_fitness(ind, cache, fixed_params=fixed_params)
+            fit, model = evaluate_fitness(ind, cache, fixed_params=fixed_params, sims_dir=sims_dir)
             fitness[i] = fit
             if fit < best_gen_fitness and model is not None:
                 best_gen_fitness = fit

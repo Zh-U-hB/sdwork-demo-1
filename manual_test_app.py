@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 
 import plotly.graph_objects as go
 import streamlit as st
@@ -61,6 +62,8 @@ if "mt_ga_total_evals" not in st.session_state:
     st.session_state.mt_ga_total_evals = 0
 if "mt_ga_running" not in st.session_state:
     st.session_state.mt_ga_running = False
+if "mt_ga_run_dir" not in st.session_state:
+    st.session_state.mt_ga_run_dir = None
 
 
 # ---------------------------------------------------------------------------
@@ -351,73 +354,72 @@ with tab_llm:
     history: list[IterationRecord] = st.session_state.mt_llm_history
     if not history:
         st.info("点击上方按钮开始 LLM 优化。")
-        st.stop()
+    else:
+        best = best_record(history)
+        st.divider()
+        mcols = st.columns(4)
+        mcols[0].metric("最优 EUI", f"{best.eui:.1f} MJ/m²" if best else "N/A")
+        mcols[1].metric("迭代次数", len(history))
+        mcols[2].metric("最优 Total Site", f"{best.total_site_gj:.2f} GJ" if best else "N/A")
+        mcols[3].metric("最优 Area", f"{best.conditioned_area_m2:.0f} m²" if best else "N/A")
 
-    best = best_record(history)
-    st.divider()
-    mcols = st.columns(4)
-    mcols[0].metric("最优 EUI", f"{best.eui:.1f} MJ/m²" if best else "N/A")
-    mcols[1].metric("迭代次数", len(history))
-    mcols[2].metric("最优 Total Site", f"{best.total_site_gj:.2f} GJ" if best else "N/A")
-    mcols[3].metric("最优 Area", f"{best.conditioned_area_m2:.0f} m²" if best else "N/A")
+        # EUI convergence plot
+        fig = go.Figure(go.Scatter(
+            x=[r.iteration for r in history],
+            y=[r.eui for r in history],
+            mode="lines+markers",
+        ))
+        fig.update_layout(height=280, xaxis_title="Iteration", yaxis_title="EUI (MJ/m²)")
+        st.plotly_chart(fig, use_container_width=True, key="mt_llm_eui_curve")
 
-    # EUI convergence plot
-    fig = go.Figure(go.Scatter(
-        x=[r.iteration for r in history],
-        y=[r.eui for r in history],
-        mode="lines+markers",
-    ))
-    fig.update_layout(height=280, xaxis_title="Iteration", yaxis_title="EUI (MJ/m²)")
-    st.plotly_chart(fig, use_container_width=True, key="mt_llm_eui_curve")
+        # Show best model with energy
+        st.subheader("最优方案 3D 分区能耗")
+        try:
+            model = generate_20260528(**best.params)
+            sim_data = read_eplustbl(best.result_dir) if best.result_dir else {"exists": False}
+            mapped = model_energy_map(model, sim_data) if sim_data.get("exists") else {}
+            st.plotly_chart(
+                render_model(
+                    model,
+                    site_size=site_size,
+                    show_edges=show_edges,
+                    opacity=opacity,
+                    zone_energy=(mapped or None),
+                    energy_metric=energy_metric,
+                ),
+                use_container_width=True,
+                key="mt_llm_best_model_3d",
+            )
+            if sim_data.get("exists"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.plotly_chart(
+                        render_end_use_chart(sim_data.get("end_uses", [])),
+                        use_container_width=True,
+                        key="mt_llm_best_end_use_bar",
+                    )
+                with c2:
+                    st.plotly_chart(
+                        render_end_use_pie(sim_data.get("end_uses", [])),
+                        use_container_width=True,
+                        key="mt_llm_best_end_use_pie",
+                    )
+        except Exception as e:
+            st.error(f"生成/展示最优方案失败：{e}")
 
-    # Show best model with energy
-    st.subheader("最优方案 3D 分区能耗")
-    try:
-        model = generate_20260528(**best.params)
-        sim_data = read_eplustbl(best.result_dir) if best.result_dir else {"exists": False}
-        mapped = model_energy_map(model, sim_data) if sim_data.get("exists") else {}
-        st.plotly_chart(
-            render_model(
-                model,
-                site_size=site_size,
-                show_edges=show_edges,
-                opacity=opacity,
-                zone_energy=(mapped or None),
-                energy_metric=energy_metric,
-            ),
+        st.subheader("每次迭代摘要")
+        st.dataframe(
+            [{
+                "iter": r.iteration,
+                "eui_mj_m2": round(r.eui, 2),
+                "total_site_gj": round(r.total_site_gj, 3),
+                "area_m2": round(r.conditioned_area_m2, 1),
+                "result_dir": r.result_dir or "",
+                "error": r.error or "",
+            } for r in history],
+            hide_index=True,
             use_container_width=True,
-            key="mt_llm_best_model_3d",
         )
-        if sim_data.get("exists"):
-            c1, c2 = st.columns(2)
-            with c1:
-                st.plotly_chart(
-                    render_end_use_chart(sim_data.get("end_uses", [])),
-                    use_container_width=True,
-                    key="mt_llm_best_end_use_bar",
-                )
-            with c2:
-                st.plotly_chart(
-                    render_end_use_pie(sim_data.get("end_uses", [])),
-                    use_container_width=True,
-                    key="mt_llm_best_end_use_pie",
-                )
-    except Exception as e:
-        st.error(f"生成/展示最优方案失败：{e}")
-
-    st.subheader("每次迭代摘要")
-    st.dataframe(
-        [{
-            "iter": r.iteration,
-            "eui_mj_m2": round(r.eui, 2),
-            "total_site_gj": round(r.total_site_gj, 3),
-            "area_m2": round(r.conditioned_area_m2, 1),
-            "result_dir": r.result_dir or "",
-            "error": r.error or "",
-        } for r in history],
-        hide_index=True,
-        use_container_width=True,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -442,10 +444,13 @@ with tab_ga:
         st.session_state.mt_ga_best_fitness = None
         st.session_state.mt_ga_total_evals = 0
         st.session_state.mt_ga_running = True
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        st.session_state.mt_ga_run_dir = f"output/ga_runs/ga_{ts}_{time.time_ns() % 1_000_000_000:09d}"
         st.rerun()
 
     if run_cols[1].button("📂 恢复 checkpoint", use_container_width=True):
-        ckpt = load_checkpoint("output/ga20260528_checkpoint.json")
+        ckpt_path = st.session_state.mt_ga_run_dir
+        ckpt = load_checkpoint(str(Path(ckpt_path) / "checkpoint.json")) if ckpt_path else None
         if ckpt and ckpt.history:
             st.session_state.mt_ga_history = ckpt.history
             best_h = min(ckpt.history, key=lambda h: h.get("best_fitness", 1e9))
@@ -458,12 +463,14 @@ with tab_ga:
 
     # Trigger GA run
     if st.session_state.mt_ga_running and not st.session_state.mt_ga_history:
+        run_dir = st.session_state.mt_ga_run_dir or "output/ga_runs/ga_unknown"
+        st.caption(f"本次 GA 输出目录：`{run_dir}`")
         config = GAConfig(
             pop_size=int(pop_size),
             n_gen=int(n_gen),
             mutation_rate=float(mutation_rate),
             elite_count=int(elite_count),
-            checkpoint_path="output/ga20260528_checkpoint.json",
+            run_dir=run_dir,
         )
 
         progress = st.progress(0.0, text="准备开始 GA…")
@@ -520,36 +527,35 @@ with tab_ga:
     history = st.session_state.mt_ga_history
     if not history:
         st.info("点击「开始 GA」运行遗传算法，或恢复 checkpoint。")
-        st.stop()
+    else:
+        gens = [h["gen"] for h in history]
+        bests = [h["best_fitness"] for h in history]
+        avgs = [h["avg_fitness"] for h in history]
+        worsts = [h["worst_fitness"] for h in history]
 
-    gens = [h["gen"] for h in history]
-    bests = [h["best_fitness"] for h in history]
-    avgs = [h["avg_fitness"] for h in history]
-    worsts = [h["worst_fitness"] for h in history]
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=gens, y=bests, mode="lines+markers", name="best", line=dict(color="#059669")))
+        fig.add_trace(go.Scatter(x=gens, y=avgs, mode="lines+markers", name="avg", line=dict(color="#2563EB")))
+        fig.add_trace(go.Scatter(x=gens, y=worsts, mode="lines+markers", name="worst", line=dict(color="#DC2626")))
+        fig.update_layout(height=300, xaxis_title="generation", yaxis_title="EUI (MJ/m²)")
+        st.plotly_chart(fig, use_container_width=True, key="mt_ga_fitness_curve")
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=gens, y=bests, mode="lines+markers", name="best", line=dict(color="#059669")))
-    fig.add_trace(go.Scatter(x=gens, y=avgs, mode="lines+markers", name="avg", line=dict(color="#2563EB")))
-    fig.add_trace(go.Scatter(x=gens, y=worsts, mode="lines+markers", name="worst", line=dict(color="#DC2626")))
-    fig.update_layout(height=300, xaxis_title="generation", yaxis_title="EUI (MJ/m²)")
-    st.plotly_chart(fig, use_container_width=True, key="mt_ga_fitness_curve")
-
-    best_params = st.session_state.mt_ga_best_params
-    best_fit = st.session_state.mt_ga_best_fitness
-    if best_params:
-        st.subheader("最优方案")
-        st.metric("Best EUI", f"{best_fit:.1f} MJ/m²" if best_fit else "N/A")
-        st.json(best_params)
-        try:
-            full = {**current_params, **best_params}
-            if "add_aerial_platforms" in full:
-                full["add_aerial_platforms"] = bool(int(full["add_aerial_platforms"]))
-            model = generate_20260528(**full)
-            st.plotly_chart(
-                render_model(model, site_size, show_edges, opacity),
-                use_container_width=True,
-                key="mt_ga_best_model_3d",
-            )
-        except Exception as e:
-            st.error(f"生成最优模型失败：{e}")
+        best_params = st.session_state.mt_ga_best_params
+        best_fit = st.session_state.mt_ga_best_fitness
+        if best_params:
+            st.subheader("最优方案")
+            st.metric("Best EUI", f"{best_fit:.1f} MJ/m²" if best_fit else "N/A")
+            st.json(best_params)
+            try:
+                full = {**current_params, **best_params}
+                if "add_aerial_platforms" in full:
+                    full["add_aerial_platforms"] = bool(int(full["add_aerial_platforms"]))
+                model = generate_20260528(**full)
+                st.plotly_chart(
+                    render_model(model, site_size, show_edges, opacity),
+                    use_container_width=True,
+                    key="mt_ga_best_model_3d",
+                )
+            except Exception as e:
+                st.error(f"生成最优模型失败：{e}")
 
