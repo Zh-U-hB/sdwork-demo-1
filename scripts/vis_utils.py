@@ -16,11 +16,29 @@ from scripts.ep_sim_utils import MASS_HEIGHT_THRESHOLD
 def box_vertices(zone: dict) -> tuple[list[float], list[float], list[float]]:
     if "points" in zone:
         points = zone["points"]
-        return (
-            [point["x"] for point in points],
-            [point["y"] for point in points],
-            [point["z"] for point in points],
-        )
+        xs = [point["x"] for point in points]
+        ys = [point["y"] for point in points]
+        zs = [point["z"] for point in points]
+        # Some generators may store extruded polygons as 2n points (bottom+top),
+        # which are not compatible with the cube Mesh3d indices below. In that
+        # case, fall back to rendering the zone's bounding box.
+        if len(points) != 8:
+            x0, x1 = min(xs), max(xs)
+            y0, y1 = min(ys), max(ys)
+            z0, z1 = min(zs), max(zs)
+            vertices = [
+                (x0, y0, z0),
+                (x1, y0, z0),
+                (x1, y1, z0),
+                (x0, y1, z0),
+                (x0, y0, z1),
+                (x1, y0, z1),
+                (x1, y1, z1),
+                (x0, y1, z1),
+            ]
+            x, y, z = zip(*vertices)
+            return list(x), list(y), list(z)
+        return (xs, ys, zs)
 
     origin = zone["origin"]
     dims = zone["dimensions"]
