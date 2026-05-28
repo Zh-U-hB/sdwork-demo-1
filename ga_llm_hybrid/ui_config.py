@@ -36,8 +36,15 @@ def build_config_from_manual_params(
         "floor_height",
         "low_aspect_ratio",
     ]
+    tunable_names.extend([
+        "window_wwr",
+        "window_module",
+        "shading_depth",
+        "window_enabled",
+        "shading_enabled",
+    ])
     if include_ep_tunables:
-        tunable_names.extend(["window_wwr", "lights_watts_per_floor_area"])
+        tunable_names.append("lights_watts_per_floor_area")
 
     param_defs: list[ParamDef] = [
         ParamDef(
@@ -52,11 +59,17 @@ def build_config_from_manual_params(
         ParamDef(name="floor_height", type="continuous", range=[3.0, 5.0]),
         ParamDef(name="low_aspect_ratio", type="continuous", range=[0.5, 2.0]),
     ]
+    param_defs.extend([
+        ParamDef(name="window_wwr", type="continuous", range=[0.0, 0.8]),
+        ParamDef(name="window_module", type="continuous", range=[0.5, 3.0]),
+        ParamDef(name="shading_depth", type="continuous", range=[0.0, 2.0]),
+        ParamDef(name="window_enabled", type="boolean"),
+        ParamDef(name="shading_enabled", type="boolean"),
+    ])
     if include_ep_tunables:
-        param_defs.extend([
-            ParamDef(name="window_wwr", type="continuous", range=[0.0, 0.6]),
+        param_defs.append(
             ParamDef(name="lights_watts_per_floor_area", type="continuous", range=[6.0, 18.0]),
-        ])
+        )
 
     fixed = {k: v for k, v in current_params.items() if k not in tunable_names}
     fixed.setdefault("building_name", "GA_LLM_Hybrid_UI")

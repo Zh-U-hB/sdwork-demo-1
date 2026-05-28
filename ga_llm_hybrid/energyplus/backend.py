@@ -35,7 +35,6 @@ class ArchModelBackend(EvaluationBackend):
         {
             "lights_watts_per_floor_area",
             "people_per_floor_area",
-            "window_wwr",
             "heating_setpoint",
             "cooling_setpoint",
         }
@@ -54,8 +53,12 @@ class ArchModelBackend(EvaluationBackend):
         run_dir: Path,
     ) -> list[Individual]:
         from scripts.ep_sim_utils import read_eplustbl, run_ep_simulation_direct
+        from scripts.facade_params import (
+            FACADE_GEOMETRY_KEYS,
+            decode_generator_bools,
+            make_ep_defaults_for_geometry,
+        )
         from scripts.generate_20260528 import generate_20260528
-        from scripts.idf_defaults import make_default_settings
         from scripts.zone_partition import partition_model_by_floor
 
         sim_root = run_dir / "sims" / self._sim_subdir(generation)
@@ -70,11 +73,14 @@ class ArchModelBackend(EvaluationBackend):
                 geo = {**self.fixed_geometry}
                 ep_overrides: dict[str, float] = {}
                 for k, v in ind.params.items():
-                    if k in self._EP_KEYS:
+                    if k in FACADE_GEOMETRY_KEYS:
+                        geo[k] = v
+                    elif k in self._EP_KEYS:
                         ep_overrides[k] = float(v)
                     elif not k.startswith("_"):
                         geo[k] = v
 
+                geo = decode_generator_bools(geo)
                 model = generate_20260528(**geo)
                 if self.ep_cfg.partition_enabled:
                     model = partition_model_by_floor(
@@ -88,7 +94,7 @@ class ArchModelBackend(EvaluationBackend):
                     encoding="utf-8",
                 )
 
-                defaults = make_default_settings()
+                defaults = make_ep_defaults_for_geometry(geo, ep_overrides)
                 self._apply_ep_overrides(defaults, ep_overrides)
 
                 result_dir = run_ep_simulation_direct(

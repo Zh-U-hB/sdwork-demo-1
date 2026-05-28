@@ -25,6 +25,7 @@ from scripts.ga_core_20260528 import (
     run_ga,
     save_checkpoint,
 )
+from scripts.facade_params import FACADE_TUNABLE, default_facade_params
 from scripts.llm_optimizer import (
     ALL_TUNABLE,
     IterationRecord,
@@ -163,6 +164,16 @@ with st.sidebar:
     add_open_space_markers = st.checkbox("add_open_space_markers", value=True)
 
     st.divider()
+    st.subheader("立面窗户与遮阳")
+    _facade_defaults = default_facade_params()
+    window_enabled = st.checkbox("启用立面窗户 (几何模块窗)", value=_facade_defaults["window_enabled"])
+    window_wwr = st.slider("window_wwr (几何窗墙比)", 0.0, 0.8, float(_facade_defaults["window_wwr"]), 0.05)
+    window_module = st.slider("window_module (m)", 0.5, 3.0, float(_facade_defaults["window_module"]), 0.1)
+    shading_enabled = st.checkbox("启用水平遮阳 overhang", value=_facade_defaults["shading_enabled"])
+    shading_depth = st.slider("shading_depth (m)", 0.0, 2.0, float(_facade_defaults["shading_depth"]), 0.05)
+    st.caption("运行 EnergyPlus 时，全局 IDF 窗墙比会与几何 window_wwr 同步。")
+
+    st.divider()
     st.subheader("分区（Partition）")
     partition_enabled = st.checkbox("启用分区后再模拟（推荐）", value=True)
     perimeter_depth = st.slider("perimeter_depth (m)", 1.0, 8.0, 4.0, 0.5)
@@ -189,8 +200,15 @@ def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> 
         st.subheader("模拟")
         st.caption("走 direct 路径：JSON → IDF → EnergyPlus（无 MCP/LLM）。")
         if st.button("▶ 运行 EnergyPlus（Direct）", type="primary", use_container_width=True, key=f"{key_prefix}_run_ep"):
+            from scripts.facade_params import make_ep_defaults_for_geometry
+
+            ep_defaults = make_ep_defaults_for_geometry(current_params)
             with st.spinner("正在运行 EnergyPlus…"):
-                result_dir = run_ep_simulation_direct(sim_model, building_name=building_name)
+                result_dir = run_ep_simulation_direct(
+                    sim_model,
+                    building_name=building_name,
+                    defaults=ep_defaults,
+                )
             if result_dir:
                 st.session_state.mt_last_result_dir = result_dir
                 st.success(f"完成：{result_dir}")
@@ -303,6 +321,11 @@ current_params = dict(
     add_aerial_platforms=bool(add_aerial_platforms),
     platform_edge_walk_distance=float(platform_edge_walk_distance),
     add_open_space_markers=bool(add_open_space_markers),
+    window_enabled=bool(window_enabled),
+    window_wwr=float(window_wwr),
+    window_module=float(window_module),
+    shading_enabled=bool(shading_enabled),
+    shading_depth=float(shading_depth),
 )
 current_model = generate_20260528(**current_params)
 current_metrics = model_metrics(current_model, gross_area_fn=gross_area)
@@ -409,7 +432,11 @@ with tab_llm:
                 "add_aerial_platforms": {"min": 0, "max": 1, "type": "int", "description": "Whether to add aerial platforms (0/1)"},
             }
 
-            tunable = (ALL_TUNABLE | TUNABLE_20260528) if include_ep_defaults else TUNABLE_20260528
+            tunable = (
+                (ALL_TUNABLE | TUNABLE_20260528 | FACADE_TUNABLE)
+                if include_ep_defaults
+                else (TUNABLE_20260528 | FACADE_TUNABLE)
+            )
             with st.spinner("正在运行 LLM 优化（会多次触发 EnergyPlus 模拟）…"):
                 st.session_state.mt_llm_history = run_llm_optimization(
                     initial_params=initial,

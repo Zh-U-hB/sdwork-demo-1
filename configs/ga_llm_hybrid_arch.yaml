@@ -30,6 +30,11 @@ energyplus:
     total_area: 8000.0
     setback_south: 15.0
     setback_west: 15.0
+    window_enabled: true
+    window_wwr: 0.4
+    window_module: 1.0
+    shading_enabled: true
+    shading_depth: 0.5
 
 llm:
   enabled: true
@@ -52,12 +57,20 @@ parameters:
       range: [0.8, 1.4]
       unit: "-"
     - name: window_wwr
-      range: [0.0, 0.5]
+      range: [0.0, 0.8]
       unit: "-"
+    - name: window_module
+      range: [0.5, 3.0]
+      unit: m
+    - name: shading_depth
+      range: [0.0, 2.0]
+      unit: m
     - name: lights_watts_per_floor_area
       range: [6.0, 16.0]
       unit: "W/m2"
-  boolean: []
+  boolean:
+    - name: window_enabled
+    - name: shading_enabled
 
 objectives:
   - name: eui_mj_m2

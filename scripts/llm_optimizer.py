@@ -315,10 +315,18 @@ def _sanitize_params(
             value = float(value)
         value = max(lo, min(hi, value))
 
-        if key in EP_DEFAULTS_TUNABLE:
+        from scripts.facade_params import FACADE_GEOMETRY_KEYS
+
+        if key in FACADE_GEOMETRY_KEYS:
+            geo_params[key] = value
+        elif key in EP_DEFAULTS_TUNABLE:
             ep_overrides[key] = value
         else:
             geo_params[key] = value
+
+    from scripts.facade_params import decode_generator_bools
+
+    geo_params = decode_generator_bools(geo_params)
 
     # Validate that generator accepts the new geo params; revert both dicts on failure
     try:
@@ -486,6 +494,9 @@ def run_llm_optimization(
             )
 
         ep_defaults = _apply_ep_overrides(ep_overrides)
+        from scripts.facade_params import apply_facade_to_ep_defaults
+
+        apply_facade_to_ep_defaults(ep_defaults, params)
 
         # Persist iteration settings (for reproducibility)
         iter_ns = time.time_ns() % 1_000_000_000

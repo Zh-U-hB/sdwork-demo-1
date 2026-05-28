@@ -51,6 +51,11 @@ DEFAULT_GENES_20260528: list[GeneSpec] = [
     GeneSpec("min_support_overlap_ratio", 0.1, 1.0, 0.05),
     GeneSpec("platform_edge_walk_distance", 1.0, 12.0, 0.5),
     GeneSpec("add_aerial_platforms", 0, 1, 1, is_int=True),  # bool encoded as 0/1
+    GeneSpec("window_wwr", 0.0, 0.8, 0.05),
+    GeneSpec("window_module", 0.5, 3.0, 0.1),
+    GeneSpec("shading_depth", 0.0, 2.0, 0.05),
+    GeneSpec("window_enabled", 0, 1, 1, is_int=True),
+    GeneSpec("shading_enabled", 0, 1, 1, is_int=True),
 ]
 
 
@@ -203,9 +208,9 @@ def evaluate_fitness(
     full_params = {**fixed_params, **individual}
     # Remove GA-internal keys before calling the generator.
     geo_params = {k: v for k, v in full_params.items() if not str(k).startswith("_")}
-    # decode bool
-    if "add_aerial_platforms" in geo_params:
-        geo_params["add_aerial_platforms"] = bool(int(geo_params["add_aerial_platforms"]))
+    from scripts.facade_params import decode_generator_bools
+
+    geo_params = decode_generator_bools(geo_params)
 
     key = _params_hash(geo_params)
     if use_cache and key in cache:
@@ -231,10 +236,14 @@ def evaluate_fitness(
             return PENALTY, raw_model, None
 
     try:
+        from scripts.facade_params import make_ep_defaults_for_geometry
+
+        ep_defaults = make_ep_defaults_for_geometry(geo_params)
         eval_id = eval_subdir
         result_dir = run_ep_simulation(
             model,
             geo_params.get("building_name", "GA_20260528"),
+            defaults=ep_defaults,
             output_base=sims_dir,
             run_id=eval_id,
         )
