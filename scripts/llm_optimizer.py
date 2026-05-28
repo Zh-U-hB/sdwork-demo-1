@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
@@ -434,6 +436,24 @@ def run_llm_optimization(
     ep_overrides = dict(initial_ep_overrides or {})
     history: list[IterationRecord] = []
 
+    # Create one directory per LLM optimization run, and store per-iteration simulations inside.
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    ns = time.time_ns() % 1_000_000_000
+    run_dir = Path(output_base) / f"llm_{ts}_{ns:09d}"
+    sims_dir = run_dir / "sims"
+    sims_dir.mkdir(parents=True, exist_ok=True)
+
+    run_meta = {
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "max_iterations": int(max_iterations),
+        "convergence_threshold": float(convergence_threshold),
+        "initial_params": dict(initial_params),
+        "initial_ep_overrides": dict(initial_ep_overrides or {}),
+        "tunable_keys": sorted(list((tunable_spec or ALL_TUNABLE).keys())),
+    }
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
     for i in range(max_iterations):
         # --- Generate model and run simulation ---
         try:
@@ -452,11 +472,25 @@ def run_llm_optimization(
 
         ep_defaults = _apply_ep_overrides(ep_overrides)
 
+        # Persist iteration settings (for reproducibility)
+        iter_ns = time.time_ns() % 1_000_000_000
+        iter_id = f"iter_{i:02d}_{iter_ns:09d}"
+        iter_settings = {
+            "iteration": i,
+            "params": dict(params),
+            "ep_defaults_overrides": dict(ep_overrides),
+        }
+        (sims_dir / f"{iter_id}.json").write_text(
+            json.dumps(iter_settings, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
         result_dir = run_ep_simulation_direct(
             model,
             building_name=params.get("building_name", "LLM_Opt"),
             defaults=ep_defaults,
-            output_base=output_base,
+            output_base=sims_dir,
+            run_id=iter_id,
         )
 
         if result_dir is None:

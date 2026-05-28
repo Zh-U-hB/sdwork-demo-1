@@ -72,6 +72,7 @@ class GAConfig:
     # - each simulation evaluation is written under <run_dir>/sims/<eval_id>/
     run_dir: str | None = None
     run_root: str = "output/ga_runs"
+    use_cache: bool = True  # if False: run every evaluation (no dedupe)
 
 
 def _ensure_run_dir(config: GAConfig) -> Path:
@@ -169,6 +170,8 @@ def evaluate_fitness(
     *,
     fixed_params: dict,
     sims_dir: Path,
+    eval_subdir: str,
+    use_cache: bool,
 ) -> tuple[float, dict | None]:
     """Return (EUI, model_dict). model_dict is None if evaluation failed."""
     full_params = {**fixed_params, **individual}
@@ -177,7 +180,7 @@ def evaluate_fitness(
         full_params["add_aerial_platforms"] = bool(int(full_params["add_aerial_platforms"]))
 
     key = _params_hash(full_params)
-    if key in cache:
+    if use_cache and key in cache:
         return cache[key], None
 
     try:
@@ -187,7 +190,7 @@ def evaluate_fitness(
         return PENALTY, None
 
     try:
-        eval_id = f"eval_{key[:12]}"
+        eval_id = eval_subdir
         result_dir = run_ep_simulation(
             model,
             full_params.get("building_name", "GA_20260528"),
@@ -257,6 +260,8 @@ def run_ga(
         "seed": int(seed) if seed is not None else None,
         "batch_size": int(config.pop_size),
         "gene_count": len(genes),
+        "use_cache": bool(config.use_cache),
+        "expected_evaluations": int(config.pop_size) * (int(config.n_gen) + 1),
     }
     (run_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
 
@@ -266,19 +271,28 @@ def run_ga(
     if config.checkpoint_path == "output/ga20260528_checkpoint.json":
         config.checkpoint_path = str(run_dir / "checkpoint.json")
 
-    cache = _load_cache(config.cache_path)
+    cache = _load_cache(config.cache_path) if config.use_cache else {}
 
     population = [random_individual(genes) for _ in range(config.pop_size)]
     fitness = [PENALTY] * config.pop_size
     best_model = None
 
     for i, ind in enumerate(population):
-        fit, model = evaluate_fitness(ind, cache, fixed_params=fixed_params, sims_dir=sims_dir)
+        eval_subdir = f"gen_init/ind_{i:02d}_{time.time_ns() % 1_000_000_000:09d}"
+        fit, model = evaluate_fitness(
+            ind,
+            cache,
+            fixed_params=fixed_params,
+            sims_dir=sims_dir,
+            eval_subdir=eval_subdir,
+            use_cache=config.use_cache,
+        )
         fitness[i] = fit
         if fit < PENALTY and model is not None:
             best_model = model
 
-    _save_cache(cache, config.cache_path)
+    if config.use_cache:
+        _save_cache(cache, config.cache_path)
 
     elite_count = min(config.elite_count, config.pop_size)
 
@@ -311,13 +325,22 @@ def run_ga(
         best_model = None
         best_gen_fitness = PENALTY
         for i, ind in enumerate(population):
-            fit, model = evaluate_fitness(ind, cache, fixed_params=fixed_params, sims_dir=sims_dir)
+            eval_subdir = f"gen_{gen:02d}/ind_{i:02d}_{time.time_ns() % 1_000_000_000:09d}"
+            fit, model = evaluate_fitness(
+                ind,
+                cache,
+                fixed_params=fixed_params,
+                sims_dir=sims_dir,
+                eval_subdir=eval_subdir,
+                use_cache=config.use_cache,
+            )
             fitness[i] = fit
             if fit < best_gen_fitness and model is not None:
                 best_gen_fitness = fit
                 best_model = model
 
-        _save_cache(cache, config.cache_path)
+        if config.use_cache:
+            _save_cache(cache, config.cache_path)
 
     ranked = sorted(range(config.pop_size), key=lambda i: fitness[i])
     best_idx = ranked[0]

@@ -471,6 +471,7 @@ with tab_ga:
             mutation_rate=float(mutation_rate),
             elite_count=int(elite_count),
             run_dir=run_dir,
+            use_cache=False,  # 不去重：每次评估都跑模拟并落盘一个目录
         )
 
         progress = st.progress(0.0, text="准备开始 GA…")
