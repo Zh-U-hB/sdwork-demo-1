@@ -121,7 +121,12 @@ class HvacDef:
 
 @dataclass
 class WindowDef:
-    """Window-to-wall ratio and construction for exterior walls."""
+    """Window-to-wall ratio (fallback) and glazing construction for fenestration.
+
+    When the BuildingModel JSON includes per-zone ``windows`` vertices, the
+    converter uses those surfaces with ``construction_name`` (glass layers).
+    ``wwr`` applies only if no geometry windows are present.
+    """
     wwr: float = 0.0                       # 0.0 = no windows; 0.4 = 40%
     construction_name: str = "WindowConstruction"
 

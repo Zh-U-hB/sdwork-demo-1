@@ -54,8 +54,14 @@ from idfpy.models.outputs import (
     OutputTableSummaryReportsReportsItem,
 )
 from idfpy.models.schedules import ScheduleCompactDataItem
-from idfpy.models.thermal_zones import BuildingSurfaceDetailedVerticesItem
+from idfpy.models.thermal_zones import (
+    BuildingSurfaceDetailedVerticesItem,
+    ShadingBuildingDetailed,
+)
 from idfpy.sim import simulate
+
+# Ground-contact floors use adiabatic boundary (no ground heat transfer).
+GROUND_BOUNDARY = "Adiabatic"
 
 # ---------------------------------------------------------------------------
 # ASCII name sanitisation
@@ -425,7 +431,7 @@ def _build_split_surfaces(boxes: list[_ZoneBox], tol: float = 0.01) -> list[_Sur
             surface_type="Floor",
             construction=floor_con,
             zone=upper.ascii_name,
-            boundary="Surface" if upper.oz >= tol else "Ground",
+            boundary="Surface" if upper.oz >= tol else GROUND_BOUNDARY,
             boundary_object=ceil_name if upper.oz >= tol else "",
             sun="NoSun",
             wind="NoWind",
@@ -488,7 +494,7 @@ def _build_split_surfaces(boxes: list[_ZoneBox], tol: float = 0.01) -> list[_Sur
                     surface_type="Floor",
                     construction=floor_con,
                     zone=zn,
-                    boundary="Ground",
+                    boundary=GROUND_BOUNDARY,
                     boundary_object="",
                     sun="NoSun",
                     wind="NoWind",
@@ -593,6 +599,200 @@ def _make_surface(
     )
 
 
+@dataclass
+class _WallRef:
+    """Registry entry for matching JSON windows to IDF walls."""
+    name: str
+    zone: str
+    pts: list[Vec3]
+    is_exterior: bool = True
+
+
+def _vertices_to_vec3(vertices: list) -> list[Vec3]:
+    out: list[Vec3] = []
+    for v in vertices:
+        if isinstance(v, dict):
+            out.append((float(v["x"]), float(v["y"]), float(v["z"])))
+        else:
+            out.append((float(v[0]), float(v[1]), float(v[2])))
+    return out
+
+
+def _wall_face_from_name(wall_name: str) -> str | None:
+    for face in ("South", "North", "East", "West"):
+        if f"_Wall_{face}" in wall_name:
+            return face
+    return None
+
+
+def _plane_distance(pt: Vec3, plane_pt: Vec3, normal: Vec3) -> float:
+    return abs(
+        (pt[0] - plane_pt[0]) * normal[0]
+        + (pt[1] - plane_pt[1]) * normal[1]
+        + (pt[2] - plane_pt[2]) * normal[2]
+    )
+
+
+def _wall_plane_normal(wall_pts: list[Vec3]) -> Vec3 | None:
+    if len(wall_pts) < 3:
+        return None
+    ax, ay, az = wall_pts[1][0] - wall_pts[0][0], wall_pts[1][1] - wall_pts[0][1], wall_pts[1][2] - wall_pts[0][2]
+    bx, by, bz = wall_pts[2][0] - wall_pts[0][0], wall_pts[2][1] - wall_pts[0][1], wall_pts[2][2] - wall_pts[0][2]
+    nx, ny, nz = ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+    length = (nx * nx + ny * ny + nz * nz) ** 0.5
+    if length < 1e-9:
+        return None
+    return (nx / length, ny / length, nz / length)
+
+
+def _window_on_wall(win_pts: list[Vec3], wall_pts: list[Vec3], tol: float) -> bool:
+    normal = _wall_plane_normal(wall_pts)
+    if normal is None:
+        return False
+    return all(_plane_distance(p, wall_pts[0], normal) <= tol for p in win_pts)
+
+
+def _bounds_3d(pts: list[Vec3]) -> tuple[float, float, float, float, float, float]:
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    zs = [p[2] for p in pts]
+    return min(xs), max(xs), min(ys), max(ys), min(zs), max(zs)
+
+
+def _tri_area_3d(a: Vec3, b: Vec3, c: Vec3) -> float:
+    ax, ay, az = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    bx, by, bz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    cx, cy, cz = ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx
+    return 0.5 * (cx * cx + cy * cy + cz * cz) ** 0.5
+
+
+def _quad_area_3d(pts: list[Vec3]) -> float:
+    if len(pts) < 4:
+        return 0.0
+    return _tri_area_3d(pts[0], pts[1], pts[2]) + _tri_area_3d(pts[0], pts[2], pts[3])
+
+
+def _window_within_wall_bounds(win_pts: list[Vec3], wall_pts: list[Vec3], tol: float) -> bool:
+    """True when all window vertices lie inside the wall axis-aligned bounding box."""
+    wx0, wx1, wy0, wy1, wz0, wz1 = _bounds_3d(wall_pts)
+    for x, y, z in win_pts:
+        if not (wx0 - tol <= x <= wx1 + tol and wy0 - tol <= y <= wy1 + tol and wz0 - tol <= z <= wz1 + tol):
+            return False
+    return True
+
+
+# EnergyPlus rejects fenestration when total opening area exceeds the parent wall.
+_MAX_WALL_OPENING_FRACTION = 0.98
+
+
+def _find_wall_for_window(
+    zone_ascii: str,
+    window: dict,
+    wall_index: list[_WallRef],
+    win_pts: list[Vec3],
+    tol: float = 0.08,
+) -> _WallRef | None:
+    face_raw = (window.get("face") or "").strip().lower()
+    face_map = {"south": "South", "north": "North", "east": "East", "west": "West"}
+    face_cap = face_map.get(face_raw)
+    candidates = [
+        w
+        for w in wall_index
+        if w.zone == zone_ascii and w.is_exterior and (face_cap is None or _wall_face_from_name(w.name) == face_cap)
+    ]
+    if not candidates:
+        return None
+    matched = [
+        w
+        for w in candidates
+        if _window_on_wall(win_pts, w.pts, tol) and _window_within_wall_bounds(win_pts, w.pts, tol)
+    ]
+    if not matched:
+        return None
+    # Prefer the smallest containing wall (partition sub-surfaces over full facades).
+    matched.sort(key=lambda w: _quad_area_3d(w.pts))
+    return matched[0]
+
+
+def _add_json_fenestration(
+    idf: IDF,
+    raw_zones: list[dict],
+    zone_ascii_map: dict[str, str],
+    wall_index: list[_WallRef],
+    construction: str,
+    *,
+    tol: float = 0.08,
+) -> int:
+    """Add FenestrationSurface:Detailed from zone ``windows`` in model JSON."""
+    count = 0
+    skipped_area = 0
+    used_names: set[str] = set()
+    opening_area: dict[str, float] = {}
+
+    for z in raw_zones:
+        zone_ascii = zone_ascii_map.get(z["name"])
+        if not zone_ascii:
+            continue
+        for wi, window in enumerate(z.get("windows") or []):
+            win_pts = _vertices_to_vec3(window.get("vertices") or [])
+            if len(win_pts) != 4:
+                continue
+            wall = _find_wall_for_window(zone_ascii, window, wall_index, win_pts, tol=tol)
+            if wall is None:
+                continue
+            wall_area = _quad_area_3d(wall.pts)
+            win_area = _quad_area_3d(win_pts)
+            if wall_area <= 0.0 or win_area <= 0.0:
+                continue
+            used = opening_area.get(wall.name, 0.0)
+            if used + win_area > _MAX_WALL_OPENING_FRACTION * wall_area:
+                skipped_area += 1
+                continue
+            opening_area[wall.name] = used + win_area
+            raw_name = str(window.get("name") or f"{zone_ascii}_Win_{wi:03d}")
+            win_name = _ascii_name(raw_name, wi + count + 1, prefix="Win")
+            while win_name in used_names:
+                win_name = f"{win_name}_{count}"
+            used_names.add(win_name)
+            idf.add(_make_window(name=win_name, construction=construction, wall_name=wall.name, pts=win_pts))
+            count += 1
+
+    if skipped_area:
+        print(
+            f"[idf_converter] Skipped {skipped_area} windows that would exceed "
+            f"{_MAX_WALL_OPENING_FRACTION:.0%} of parent wall opening area"
+        )
+    return count
+
+
+def _add_json_shading(
+    idf: IDF,
+    raw_zones: list[dict],
+    zone_ascii_map: dict[str, str],
+) -> int:
+    """Add Shading:Building:Detailed from zone ``shading_surfaces`` in model JSON."""
+    count = 0
+    used_names: set[str] = set()
+    for z in raw_zones:
+        for si, shading in enumerate(z.get("shading_surfaces") or []):
+            pts = _vertices_to_vec3(shading.get("vertices") or [])
+            if len(pts) < 3:
+                continue
+            raw_name = str(shading.get("name") or f"Shade_{count:04d}")
+            shade_name = _ascii_name(raw_name, count + si + 1, prefix="Shade")
+            while shade_name in used_names:
+                shade_name = f"{shade_name}_{count}"
+            used_names.add(shade_name)
+            idf.add(ShadingBuildingDetailed(
+                name=shade_name,
+                transmittance_schedule_name=None,
+                number_of_vertices=len(pts),
+                vertices=_verts(pts),
+            ))
+            count += 1
+    return count
+
+
 def _make_window(name: str, construction: str, wall_name: str, pts: list[Vec3]) -> FenestrationSurfaceDetailed:
     if len(pts) != 4:
         raise ValueError("Window must have exactly 4 vertices")
@@ -647,7 +847,14 @@ def _poly_wall(poly: _ZonePoly, i0: int) -> list[Vec3]:
     return [(x0, y0, z0), (x1, y1, z0), (x1, y1, z1), (x0, y0, z1)]
 
 
-def _build_zone_poly(idf: IDF, poly: _ZonePoly, defaults: ConverterDefaults) -> None:
+def _build_zone_poly(
+    idf: IDF,
+    poly: _ZonePoly,
+    defaults: ConverterDefaults,
+    wall_index: list[_WallRef],
+    *,
+    add_wwr_windows: bool,
+) -> None:
     """Add Zone + exterior-only surfaces for one extruded polygon zone."""
     zn = poly.ascii_name
     idf.add(Zone(name=zn))
@@ -659,7 +866,7 @@ def _build_zone_poly(idf: IDF, poly: _ZonePoly, defaults: ConverterDefaults) -> 
     wwr = defaults.window.wwr
 
     # Floor boundary
-    floor_boundary = "Ground" if abs(poly.oz) < 0.01 else "Outdoors"
+    floor_boundary = GROUND_BOUNDARY if abs(poly.oz) < 0.01 else "Outdoors"
     idf.add(_make_surface(
         name=f"{zn}_Floor",
         surface_type="Floor",
@@ -697,12 +904,13 @@ def _build_zone_poly(idf: IDF, poly: _ZonePoly, defaults: ConverterDefaults) -> 
             wind="WindExposed",
             pts=pts,
         ))
+        wall_index.append(_WallRef(name=sname, zone=zn, pts=pts))
 
-        # Only attempt windows on axis-aligned edges (rect helper assumption)
+        # Only attempt WWR windows when JSON geometry windows are not used
         dx = abs(pts[1][0] - pts[0][0])
         dy = abs(pts[1][1] - pts[0][1])
         axis_aligned = (dx < 1e-6) or (dy < 1e-6)
-        if axis_aligned and wwr > 0.0:
+        if add_wwr_windows and axis_aligned and wwr > 0.0:
             win_pts = _window_pts(pts, wwr)
             if win_pts:
                 idf.add(_make_window(name=f"{sname}_Window", construction=win_con, wall_name=sname, pts=win_pts))
@@ -771,8 +979,10 @@ def convert_and_run(
 
     boxes: list[_ZoneBox] = []
     polys: list[_ZonePoly] = []
+    zone_ascii_map: dict[str, str] = {}
     for idx, z in enumerate(raw_zones, 1):
         aname = _ascii_name(z["name"], idx, prefix="Zone")
+        zone_ascii_map[z["name"]] = aname
         maybe_poly = _as_poly(z, aname)
         if maybe_poly is not None:
             polys.append(maybe_poly)
@@ -787,6 +997,10 @@ def convert_and_run(
             W=float(d["width"]),
             H=float(d["height"]),
         ))
+
+    use_geometry_windows = any(z.get("windows") for z in raw_zones)
+    use_geometry_shading = any(z.get("shading_surfaces") for z in raw_zones)
+    wall_index: list[_WallRef] = []
 
     # NOTE: adjacency splitting (shared walls / stacked floors) is currently only implemented
     # for axis-aligned box zones. Polygon zones are exported as exterior-only surfaces.
@@ -909,6 +1123,7 @@ def convert_and_run(
         surface_specs = _build_split_surfaces(boxes)
         wwr = defaults.window.wwr
         win_con = defaults.window.construction_name
+        add_wwr_windows = not use_geometry_windows and wwr > 0.0
         for spec in surface_specs:
             idf.add(_make_surface(
                 name=spec.name,
@@ -921,7 +1136,9 @@ def convert_and_run(
                 pts=spec.pts,
                 boundary_object=spec.boundary_object,
             ))
-            if spec.is_wall and spec.boundary == "Outdoors" and wwr > 0.0:
+            if spec.is_wall and spec.boundary == "Outdoors":
+                wall_index.append(_WallRef(name=spec.name, zone=spec.zone, pts=spec.pts))
+            if add_wwr_windows and spec.is_wall and spec.boundary == "Outdoors":
                 win_pts = _window_pts(spec.pts, wwr)
                 if win_pts:
                     idf.add(_make_window(
@@ -933,7 +1150,23 @@ def convert_and_run(
 
     # Polygon zones: exterior-only for now (no splitting)
     for poly in polys:
-        _build_zone_poly(idf, poly, defaults)
+        _build_zone_poly(
+            idf,
+            poly,
+            defaults,
+            wall_index,
+            add_wwr_windows=not use_geometry_windows and defaults.window.wwr > 0.0,
+        )
+
+    win_con = defaults.window.construction_name
+    if use_geometry_windows:
+        n_win = _add_json_fenestration(
+            idf, raw_zones, zone_ascii_map, wall_index, win_con,
+        )
+        print(f"[idf_converter] Added {n_win} fenestration surfaces from model JSON (glass construction: {win_con})")
+    if use_geometry_shading:
+        n_shade = _add_json_shading(idf, raw_zones, zone_ascii_map)
+        print(f"[idf_converter] Added {n_shade} Shading:Building:Detailed surfaces from model JSON")
 
     # ── Loads & HVAC ───────────────────────────────────────────────────────
     for box in boxes:
