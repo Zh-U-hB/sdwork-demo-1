@@ -19,6 +19,7 @@ import asyncio
 import concurrent.futures
 import csv
 import os
+import shutil
 import time
 from pathlib import Path
 
@@ -38,6 +39,21 @@ from src.models.zone import BuildingModel, Dimensions, Point3D, Zone
 # ---------------------------------------------------------------------------
 
 MASS_HEIGHT_THRESHOLD = 1.0
+
+
+def ensure_energyplus_on_path() -> str | None:
+    """Return an EnergyPlus executable path, adding bundled tools/ installs to PATH if needed."""
+    existing = shutil.which("energyplus")
+    if existing:
+        return existing
+
+    root = Path(__file__).resolve().parents[1]
+    candidates = sorted(root.glob("tools/EnergyPlus-*/energyplus"), reverse=True)
+    for exe in candidates:
+        if exe.exists() and os.access(exe, os.X_OK):
+            os.environ["PATH"] = f"{exe.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+            return str(exe)
+    return None
 
 # ---------------------------------------------------------------------------
 # Model conversion
@@ -186,6 +202,8 @@ def run_ep_simulation_direct(
         Path to the directory containing ``eplustbl.csv``, or ``None`` on failure.
     """
     from scripts.idf_converter import convert_and_run  # avoid module-level dep on eppy
+
+    ensure_energyplus_on_path()
 
     if building_name:
         # Inject override into a shallow copy so we don't mutate the caller's dict
