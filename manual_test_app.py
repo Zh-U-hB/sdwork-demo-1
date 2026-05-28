@@ -108,24 +108,41 @@ with st.sidebar:
     setback_north = st.slider("setback_north", 0.0, 30.0, 10.0, 0.5)
     setback_east = st.slider("setback_east", 0.0, 30.0, 10.0, 0.5)
 
-    st.caption("Footprint aspect ratios")
-    low_aspect_ratio = st.slider("low_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
-    mid_aspect_ratio = st.slider("mid_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
-    high_aspect_ratio = st.slider("high_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
+    st.caption("Shared building controls")
+    shared_geometry_controls = st.checkbox("统一调节三栋建筑 aspect / angle / distance", value=False)
+    if shared_geometry_controls:
+        st.caption("统一模式下：低/中建筑使用该长宽比，高层建筑使用倒数，形成相反 x/y 比例。")
+        shared_aspect_ratio = st.slider("shared_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
+        shared_offset_angle = st.slider("shared_offset_angle", 0.0, 360.0, 180.0, 1.0)
+        shared_offset_distance = st.slider("shared_offset_distance", 0.0, 10.0, 2.0, 0.1)
+        low_aspect_ratio = mid_aspect_ratio = shared_aspect_ratio
+        high_aspect_ratio = 1.0 / shared_aspect_ratio
+        low_offset_angle = mid_offset_angle = high_offset_angle = shared_offset_angle
+        low_offset_distance = mid_offset_distance = high_offset_distance = shared_offset_distance
+    else:
+        shared_aspect_ratio = None
+        shared_offset_angle = None
+        shared_offset_distance = None
+
+        st.caption("Footprint aspect ratios")
+        low_aspect_ratio = st.slider("low_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
+        mid_aspect_ratio = st.slider("mid_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
+        high_aspect_ratio = st.slider("high_aspect_ratio", 0.5, 2.0, 1.0, 0.05)
 
     st.caption("Offset grouping")
     boundary_shift = st.slider("boundary_shift", 0.0, 200.0, 40.0, 1.0)
     group_size = st.slider("group_size", 1, 4, 2)
 
-    st.caption("Offset angles (deg)")
-    low_offset_angle = st.slider("low_offset_angle", 0.0, 360.0, 45.0, 1.0)
-    mid_offset_angle = st.slider("mid_offset_angle", 0.0, 360.0, 180.0, 1.0)
-    high_offset_angle = st.slider("high_offset_angle", 0.0, 360.0, 315.0, 1.0)
+    if not shared_geometry_controls:
+        st.caption("Offset angles (deg)")
+        low_offset_angle = st.slider("low_offset_angle", 0.0, 360.0, 45.0, 1.0)
+        mid_offset_angle = st.slider("mid_offset_angle", 0.0, 360.0, 180.0, 1.0)
+        high_offset_angle = st.slider("high_offset_angle", 0.0, 360.0, 315.0, 1.0)
 
-    st.caption("Offset distances (m)")
-    low_offset_distance = st.slider("low_offset_distance", 0.0, 10.0, 2.0, 0.1)
-    mid_offset_distance = st.slider("mid_offset_distance", 0.0, 10.0, 2.0, 0.1)
-    high_offset_distance = st.slider("high_offset_distance", 0.0, 10.0, 2.0, 0.1)
+        st.caption("Offset distances (m)")
+        low_offset_distance = st.slider("low_offset_distance", 0.0, 10.0, 2.0, 0.1)
+        mid_offset_distance = st.slider("mid_offset_distance", 0.0, 10.0, 2.0, 0.1)
+        high_offset_distance = st.slider("high_offset_distance", 0.0, 10.0, 2.0, 0.1)
 
     min_support_overlap_ratio = st.slider("min_support_overlap_ratio", 0.1, 1.0, 0.5, 0.05)
     add_aerial_platforms = st.checkbox("add_aerial_platforms", value=True)
@@ -249,14 +266,17 @@ current_params = dict(
     setback_west=float(setback_west),
     setback_north=float(setback_north),
     setback_east=float(setback_east),
+    shared_aspect_ratio=float(shared_aspect_ratio) if shared_aspect_ratio is not None else None,
     low_aspect_ratio=float(low_aspect_ratio),
     mid_aspect_ratio=float(mid_aspect_ratio),
     high_aspect_ratio=float(high_aspect_ratio),
     boundary_shift=float(boundary_shift),
     group_size=int(group_size),
+    shared_offset_angle=float(shared_offset_angle) if shared_offset_angle is not None else None,
     low_offset_angle=float(low_offset_angle),
     mid_offset_angle=float(mid_offset_angle),
     high_offset_angle=float(high_offset_angle),
+    shared_offset_distance=float(shared_offset_distance) if shared_offset_distance is not None else None,
     low_offset_distance=float(low_offset_distance),
     mid_offset_distance=float(mid_offset_distance),
     high_offset_distance=float(high_offset_distance),
@@ -600,4 +620,3 @@ with tab_ga:
                 )
             except Exception as e:
                 st.error(f"生成最优模型失败：{e}")
-
