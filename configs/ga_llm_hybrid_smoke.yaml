@@ -1,0 +1,37 @@
+# Minimal smoke test: 2 individuals × 1 generation × 1 round, no LLM/Morris
+project:
+  name: smoke_test
+  seed: 42
+  max_rounds: 1
+  min_rounds: 1
+  debug_mode: true
+  morris_enabled: false
+
+ga:
+  population_size: 2
+  max_generations: 1
+  init_mode: random
+
+energyplus:
+  backend: arch_model
+  partition_enabled: true
+  perimeter_depth: 4.0
+  fixed_geometry:
+    building_name: "GA_LLM_Smoke"
+    site_size: 100.0
+    total_area: 8000.0
+
+llm:
+  enabled: false
+
+parameters:
+  continuous:
+    - name: boundary_shift
+      range: [30.0, 50.0]
+    - name: window_wwr
+      range: [0.1, 0.4]
+
+objectives:
+  - name: eui_mj_m2
+    weight: 1.0
+    direction: minimize

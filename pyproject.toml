@@ -20,10 +20,20 @@ dependencies = [
     "httpx[socks]>=0.28.1",
     "eppy>=0.5.69",
     "idfpy>=26.1.0.post5",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src", "ga_llm_hybrid"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["hatchling"]

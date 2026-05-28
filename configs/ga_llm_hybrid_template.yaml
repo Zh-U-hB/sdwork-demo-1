@@ -1,0 +1,63 @@
+# Template IDF backend example (requires template_idf + epw on disk)
+project:
+  name: office_template_optimization
+  seed: 42
+  max_rounds: 5
+  debug_mode: false
+
+ga:
+  population_size: 20
+  max_generations: 30
+  init_mode: random
+
+energyplus:
+  backend: template_idf
+  executable_path: "/usr/local/EnergyPlus-25-1-0/energyplus"
+  epw_path: "/data/weather/SHA_EPW.epw"
+  template_idf: "/data/templates/office_base.idf"
+  parallel_jobs: 4
+  simulation_timeout: 300
+
+llm:
+  enabled: true
+  analysis_frequency: 2
+
+parameters:
+  continuous:
+    - name: shading_depth
+      range: [0.0, 2.0]
+      unit: m
+    - name: window_to_wall_ratio
+      range: [0.2, 0.8]
+  categorical:
+    - name: glazing_type
+      values: ["single_clear", "double_clear", "double_low_e", "triple_low_e"]
+  boolean:
+    - name: has_night_ventilation
+
+objectives:
+  - name: annual_energy_consumption
+    weight: 0.5
+    direction: minimize
+  - name: thermal_discomfort_hours
+    weight: 0.3
+    direction: minimize
+  - name: peak_cooling_load
+    weight: 0.2
+    direction: minimize
+
+mappings:
+  - parameter: shading_depth
+    action: modify_vertices
+    object_type: Shading:Building
+    object_name: SouthOverhang
+    field: vertices_z_offset
+  - parameter: glazing_type
+    action: replace_construction
+    object_type: Construction
+    object_name: WindowConstruction
+    material_map:
+      single_clear: SglClear3mm
+      double_clear: DblClear3mm
+      double_low_e: DblLowE
+      triple_low_e: TripleLowE

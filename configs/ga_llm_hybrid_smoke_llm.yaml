@@ -1,0 +1,41 @@
+# Smoke with LLM analysis (1 round, 2 pop, 1 gen)
+project:
+  name: smoke_llm
+  seed: 42
+  max_rounds: 1
+  min_rounds: 1
+  debug_mode: true
+  morris_enabled: false
+
+ga:
+  population_size: 2
+  max_generations: 1
+  init_mode: random
+
+energyplus:
+  backend: arch_model
+  partition_enabled: true
+  fixed_geometry:
+    building_name: "GA_LLM_Smoke_LLM"
+    site_size: 100.0
+    total_area: 8000.0
+
+llm:
+  enabled: true
+  analysis_frequency: 1
+
+parameters:
+  continuous:
+    - name: boundary_shift
+      range: [30.0, 50.0]
+    - name: window_wwr
+      range: [0.1, 0.4]
+
+objectives:
+  - name: eui_mj_m2
+    weight: 1.0
+    direction: minimize
+
+building_context:
+  climate: "夏热冬冷（上海）"
+  building_type: "办公建筑"

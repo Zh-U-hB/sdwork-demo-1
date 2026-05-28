@@ -1,0 +1,72 @@
+# GA + LLM hybrid — arch_model backend (generate_20260528 + direct EP)
+project:
+  name: arch_bridge_optimization
+  seed: 42
+  max_rounds: 3
+  min_rounds: 1
+  debug_mode: true
+  morris_enabled: false
+
+ga:
+  population_size: 5
+  max_generations: 3
+  crossover_rate: 0.9
+  mutation_rate: 0.15
+  tournament_size: 3
+  elite_fraction: 0.05
+  convergence_generations: 15
+  convergence_threshold: 0.01
+  init_mode: llm_guided
+  llm_seed_fraction: 0.2
+  global_explore_fraction: 0.2
+
+energyplus:
+  backend: arch_model
+  partition_enabled: true
+  perimeter_depth: 4.0
+  fixed_geometry:
+    building_name: "GA_LLM_Hybrid_Run"
+    site_size: 100.0
+    total_area: 8000.0
+    setback_south: 15.0
+    setback_west: 15.0
+
+llm:
+  enabled: true
+  analysis_frequency: 1
+  temperature: 0.3
+  max_tokens: 4000
+
+parameters:
+  continuous:
+    - name: boundary_shift
+      range: [25.0, 55.0]
+      unit: m
+    - name: lobby_height
+      range: [4.0, 8.0]
+      unit: m
+    - name: floor_height
+      range: [3.2, 4.5]
+      unit: m
+    - name: low_aspect_ratio
+      range: [0.8, 1.4]
+      unit: "-"
+    - name: window_wwr
+      range: [0.0, 0.5]
+      unit: "-"
+    - name: lights_watts_per_floor_area
+      range: [6.0, 16.0]
+      unit: "W/m2"
+  boolean: []
+
+objectives:
+  - name: eui_mj_m2
+    weight: 1.0
+    direction: minimize
+    output_key: eui_mj_m2
+
+building_context:
+  climate: "夏热冬冷（上海）"
+  building_type: "办公建筑"
+  floor_area: "约 2000 m²"
+  floors: "3"
