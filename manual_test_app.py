@@ -59,6 +59,10 @@ if "mt_ga_best_params" not in st.session_state:
     st.session_state.mt_ga_best_params = None
 if "mt_ga_best_fitness" not in st.session_state:
     st.session_state.mt_ga_best_fitness = None
+if "mt_ga_best_model" not in st.session_state:
+    st.session_state.mt_ga_best_model = None
+if "mt_ga_best_result_dir" not in st.session_state:
+    st.session_state.mt_ga_best_result_dir = None
 if "mt_ga_total_evals" not in st.session_state:
     st.session_state.mt_ga_total_evals = 0
 if "mt_ga_running" not in st.session_state:
@@ -140,20 +144,26 @@ with st.sidebar:
 
 def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> tuple[str | None, dict]:
     """Render simulation runner + charts. Returns (result_dir, sim_data)."""
+    # The simulation model should match the EnergyPlus run geometry.
+    sim_model = model
+    if partition_enabled:
+        try:
+            sim_model = partition_model_by_floor(
+                model,
+                perimeter_depth=float(perimeter_depth),
+                lobby_height=float(current_params.get("lobby_height", 6.0)),
+                floor_height=float(current_params.get("floor_height", 4.0)),
+            )
+        except Exception as e:
+            st.warning(f"分区失败，将使用原始模型进行模拟与可视化：{e}")
+            sim_model = model
+
     cols = st.columns([1, 2])
     with cols[0]:
         st.subheader("模拟")
         st.caption("走 direct 路径：JSON → IDF → EnergyPlus（无 MCP/LLM）。")
         if st.button("▶ 运行 EnergyPlus（Direct）", type="primary", use_container_width=True, key=f"{key_prefix}_run_ep"):
             with st.spinner("正在运行 EnergyPlus…"):
-                sim_model = model
-                if partition_enabled:
-                    sim_model = partition_model_by_floor(
-                        model,
-                        perimeter_depth=float(perimeter_depth),
-                        lobby_height=float(current_params.get("lobby_height", 6.0)),
-                        floor_height=float(current_params.get("floor_height", 4.0)),
-                    )
                 result_dir = run_ep_simulation_direct(sim_model, building_name=building_name)
             if result_dir:
                 st.session_state.mt_last_result_dir = result_dir
@@ -169,7 +179,7 @@ def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> 
             st.caption(f"使用结果：`{result_dir}`")
 
     sim_data = read_eplustbl(result_dir) if result_dir else {"exists": False}
-    mapped_energy = model_energy_map(model, sim_data) if sim_data.get("exists") else {}
+    mapped_energy = model_energy_map(sim_model, sim_data) if sim_data.get("exists") else {}
 
     with cols[1]:
         st.subheader("结果概览")
@@ -202,7 +212,7 @@ def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> 
             if mapped_energy:
                 st.subheader("模型体块分区能耗（stacked）")
                 mass_zones = [
-                    z for z in model["zones"]
+                    z for z in sim_model["zones"]
                     if z["dimensions"]["height"] > MASS_HEIGHT_THRESHOLD and z.get("category") != "open_space_reference"
                 ]
                 st.plotly_chart(
@@ -221,7 +231,7 @@ def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> 
     st.subheader("3D 分区能耗")
     st.plotly_chart(
         render_model(
-            model,
+            sim_model,
             site_size=site_size,
             show_edges=show_edges,
             opacity=opacity,
@@ -481,6 +491,8 @@ with tab_ga:
         st.session_state.mt_ga_history = []
         st.session_state.mt_ga_best_params = None
         st.session_state.mt_ga_best_fitness = None
+        st.session_state.mt_ga_best_model = None
+        st.session_state.mt_ga_best_result_dir = None
         st.session_state.mt_ga_total_evals = 0
         st.session_state.mt_ga_running = True
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -522,6 +534,7 @@ with tab_ga:
         overall_best_fitness = float("inf")
         overall_best_params = None
         overall_best_model = None
+        overall_best_result_dir = None
 
         fixed_params = dict(current_params)
         for result in run_ga(config, seed=int(seed), fixed_params=fixed_params):
@@ -539,6 +552,7 @@ with tab_ga:
                 overall_best_fitness = result.best_fitness
                 overall_best_params = result.best_params
                 overall_best_model = result.best_model
+                overall_best_result_dir = result.best_result_dir
 
             pct = (result.gen + 1) / (config.n_gen + 1)
             progress.progress(
@@ -562,6 +576,8 @@ with tab_ga:
         st.session_state.mt_ga_history = history_run
         st.session_state.mt_ga_best_params = overall_best_params
         st.session_state.mt_ga_best_fitness = overall_best_fitness
+        st.session_state.mt_ga_best_model = overall_best_model
+        st.session_state.mt_ga_best_result_dir = overall_best_result_dir
         st.session_state.mt_ga_total_evals = total_evals
         st.session_state.mt_ga_running = False
         st.rerun()
@@ -584,15 +600,34 @@ with tab_ga:
 
         best_params = st.session_state.mt_ga_best_params
         best_fit = st.session_state.mt_ga_best_fitness
+        best_model = st.session_state.mt_ga_best_model
+        best_result_dir = st.session_state.mt_ga_best_result_dir
         if best_params:
             st.subheader("最优方案")
             st.metric("Best EUI", f"{best_fit:.1f} MJ/m²" if best_fit else "N/A")
             st.json(best_params)
             try:
-                full = {**current_params, **best_params}
-                if "add_aerial_platforms" in full:
-                    full["add_aerial_platforms"] = bool(int(full["add_aerial_platforms"]))
-                model = generate_20260528(**full)
+                # Prefer using the model produced during GA evaluation (guaranteed valid).
+                model = best_model
+                if model is None and best_result_dir:
+                    try:
+                        model_path = Path(best_result_dir).parent / "model.json"
+                        if model_path.exists():
+                            model = json.loads(model_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        model = None
+                if model is None:
+                    full = {**current_params, **best_params}
+                    if "add_aerial_platforms" in full:
+                        full["add_aerial_platforms"] = bool(int(full["add_aerial_platforms"]))
+                    model = generate_20260528(**full)
+                    if partition_enabled:
+                        model = partition_model_by_floor(
+                            model,
+                            perimeter_depth=float(perimeter_depth),
+                            lobby_height=float(full.get("lobby_height", 6.0)),
+                            floor_height=float(full.get("floor_height", 4.0)),
+                        )
                 st.plotly_chart(
                     render_model(model, site_size, show_edges, opacity),
                     use_container_width=True,

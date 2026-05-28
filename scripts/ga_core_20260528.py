@@ -176,8 +176,8 @@ def evaluate_fitness(
     sims_dir: Path,
     eval_subdir: str,
     use_cache: bool,
-) -> tuple[float, dict | None]:
-    """Return (EUI, model_dict). model_dict is None if evaluation failed."""
+) -> tuple[float, dict | None, str | None]:
+    """Return (EUI, model_dict, result_dir). model_dict is None if evaluation failed."""
     full_params = {**fixed_params, **individual}
     # decode bool
     if "add_aerial_platforms" in full_params:
@@ -185,13 +185,13 @@ def evaluate_fitness(
 
     key = _params_hash(full_params)
     if use_cache and key in cache:
-        return cache[key], None
+        return cache[key], None, None
 
     try:
         raw_model = generate_20260528(**full_params)
     except Exception:
         cache[key] = PENALTY
-        return PENALTY, None
+        return PENALTY, None, None
 
     model = raw_model
     if fixed_params.get("_partition_enabled", True):
@@ -204,7 +204,7 @@ def evaluate_fitness(
             )
         except Exception:
             cache[key] = PENALTY
-            return PENALTY, raw_model
+            return PENALTY, raw_model, None
 
     try:
         eval_id = eval_subdir
@@ -216,26 +216,26 @@ def evaluate_fitness(
         )
     except Exception:
         cache[key] = PENALTY
-        return PENALTY, model
+        return PENALTY, model, None
 
     if not result_dir:
         cache[key] = PENALTY
-        return PENALTY, model
+        return PENALTY, model, None
 
     sim = read_eplustbl(result_dir)
     if not sim.get("exists"):
         cache[key] = PENALTY
-        return PENALTY, model
+        return PENALTY, model, result_dir
 
     total_gj = sim["site_energy"].get("Total Site Energy", 0.0)
     area = sim["building_area"].get("Net Conditioned Building Area", 0.0)
     if area <= 0:
         cache[key] = PENALTY
-        return PENALTY, model
+        return PENALTY, model, result_dir
 
     eui = total_gj * 1000 / area
     cache[key] = eui
-    return eui, model
+    return eui, model, result_dir
 
 
 @dataclass
@@ -244,6 +244,7 @@ class GenerationResult:
     best_fitness: float
     best_params: dict
     best_model: dict | None
+    best_result_dir: str | None
     pop_fitness: list[float]
     avg_fitness: float
     worst_fitness: float
@@ -300,10 +301,11 @@ def run_ga(
     population = [random_individual(genes) for _ in range(config.pop_size)]
     fitness = [PENALTY] * config.pop_size
     best_model = None
+    best_result_dir = None
 
     for i, ind in enumerate(population):
         eval_subdir = f"gen_init/ind_{i:02d}_{time.time_ns() % 1_000_000_000:09d}"
-        fit, model = evaluate_fitness(
+        fit, model, rdir = evaluate_fitness(
             ind,
             cache,
             fixed_params=fixed_params,
@@ -314,6 +316,7 @@ def run_ga(
         fitness[i] = fit
         if fit < PENALTY and model is not None:
             best_model = model
+            best_result_dir = rdir
 
     if config.use_cache:
         _save_cache(cache, config.cache_path)
@@ -328,6 +331,7 @@ def run_ga(
             best_fitness=fitness[best_idx],
             best_params=dict(population[best_idx]),
             best_model=best_model,
+            best_result_dir=best_result_dir,
             pop_fitness=list(fitness),
             avg_fitness=sum(fitness) / len(fitness),
             worst_fitness=fitness[ranked[-1]],
@@ -348,9 +352,10 @@ def run_ga(
         fitness = [PENALTY] * config.pop_size
         best_model = None
         best_gen_fitness = PENALTY
+        best_result_dir = None
         for i, ind in enumerate(population):
             eval_subdir = f"gen_{gen:02d}/ind_{i:02d}_{time.time_ns() % 1_000_000_000:09d}"
-            fit, model = evaluate_fitness(
+            fit, model, rdir = evaluate_fitness(
                 ind,
                 cache,
                 fixed_params=fixed_params,
@@ -362,6 +367,7 @@ def run_ga(
             if fit < best_gen_fitness and model is not None:
                 best_gen_fitness = fit
                 best_model = model
+                best_result_dir = rdir
 
         if config.use_cache:
             _save_cache(cache, config.cache_path)
@@ -373,6 +379,7 @@ def run_ga(
         best_fitness=fitness[best_idx],
         best_params=dict(population[best_idx]),
         best_model=best_model,
+        best_result_dir=best_result_dir,
         pop_fitness=list(fitness),
         avg_fitness=sum(fitness) / len(fitness),
         worst_fitness=fitness[ranked[-1]],
