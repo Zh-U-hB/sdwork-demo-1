@@ -780,6 +780,17 @@ def convert_and_run(
             H=float(d["height"]),
         ))
 
+    # NOTE: adjacency splitting (shared walls / stacked floors) is currently only implemented
+    # for axis-aligned box zones. Polygon zones are exported as exterior-only surfaces.
+    # To avoid silently producing physically-wrong boundary conditions, we fail fast when
+    # polygon zones coexist with any other zone.
+    if polys and (boxes or len(polys) > 1):
+        raise ValueError(
+            "Polygon zones (floor_polygon) currently do not support shared-surface adjacency "
+            "in IDF export. Please avoid mixing polygon zones with adjacent zones, or convert "
+            "adjacent zones to box geometry before simulation."
+        )
+
     idf = IDF()
 
     # Settings & envelope

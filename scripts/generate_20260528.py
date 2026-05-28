@@ -402,12 +402,8 @@ def validate_setbacks(zones: list[dict], x_min: float, y_min: float, x_max: floa
 
 def validate_collisions(zones: list[dict]) -> None:
     for index, a in enumerate(zones):
-        if a.get("category") == "aerial_platform":
-            continue
         ax0, ax1, ay0, ay1, az0, az1 = box_bounds(a)
         for b in zones[index + 1:]:
-            if b.get("category") == "aerial_platform":
-                continue
             bx0, bx1, by0, by1, bz0, bz1 = box_bounds(b)
             ox = overlap_1d(ax0, ax1, bx0, bx1)
             oy = overlap_1d(ay0, ay1, by0, by1)
@@ -529,7 +525,14 @@ def generate_20260528(
         raise ValueError("group_size must be at least 1")
     if platform_edge_walk_distance <= 0:
         raise ValueError("platform_edge_walk_distance must be positive")
-    if lobby_height + 5 * floor_height >= 50:
+
+    buildings = [
+        ("low_block", 4, 1.2, low_aspect_ratio, low_offset_angle, low_offset_distance),
+        ("mid_block", 5, 1.0, mid_aspect_ratio, mid_offset_angle, mid_offset_distance),
+        ("high_block", 6, 0.8, high_aspect_ratio, high_offset_angle, high_offset_distance),
+    ]
+    max_floors = max(b[1] for b in buildings)
+    if lobby_height + (max_floors - 1) * floor_height >= 50:
         raise ValueError("building height must be under 50m")
 
     x_min = setback_west
@@ -539,11 +542,6 @@ def generate_20260528(
     if x_max <= x_min or y_max <= y_min:
         raise ValueError("setbacks leave no buildable area")
 
-    buildings = [
-        ("low_block", 4, 1.2, low_aspect_ratio, low_offset_angle, low_offset_distance),
-        ("mid_block", 5, 1.0, mid_aspect_ratio, mid_offset_angle, mid_offset_distance),
-        ("high_block", 6, 0.8, high_aspect_ratio, high_offset_angle, high_offset_distance),
-    ]
     weighted_floors = sum(floors * area_ratio for _, floors, area_ratio, *_ in buildings)
     base_area = total_area / weighted_floors
 
