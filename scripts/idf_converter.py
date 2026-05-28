@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
 
@@ -160,6 +161,42 @@ def _window_pts(wall_pts: list[Vec3], wwr: float) -> list[Vec3] | None:
 
 
 # ---------------------------------------------------------------------------
+# Sub-surface vertex helpers (for split surfaces)
+# ---------------------------------------------------------------------------
+
+def _sub_floor_pts(x0: float, y0: float, x1: float, y1: float, z: float) -> list[Vec3]:
+    """Floor at z, outward normal = −Z (CCW viewed from below)."""
+    return [(x0, y1, z), (x1, y1, z), (x1, y0, z), (x0, y0, z)]
+
+
+def _sub_top_pts(x0: float, y0: float, x1: float, y1: float, z: float) -> list[Vec3]:
+    """Top surface at z, outward normal = +Z (CCW viewed from above)."""
+    return [(x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)]
+
+
+def _sub_wall_pts(direction: str, fixed: float, p0: float, p1: float, z0: float, z1: float) -> list[Vec3]:
+    """Wall quad for a sub-rectangle on a wall plane."""
+    if direction == "South":
+        return [(p0, fixed, z0), (p1, fixed, z0), (p1, fixed, z1), (p0, fixed, z1)]
+    if direction == "North":
+        return [(p1, fixed, z0), (p0, fixed, z0), (p0, fixed, z1), (p1, fixed, z1)]
+    if direction == "West":
+        return [(fixed, p1, z0), (fixed, p0, z0), (fixed, p0, z1), (fixed, p1, z1)]
+    # East
+    return [(fixed, p0, z0), (fixed, p1, z0), (fixed, p1, z1), (fixed, p0, z1)]
+
+
+def _wall_fixed_coord(box: "_ZoneBox", direction: str) -> float:
+    if direction == "South":
+        return box.oy
+    if direction == "North":
+        return box.y_max
+    if direction == "West":
+        return box.ox
+    return box.x_max  # East
+
+
+# ---------------------------------------------------------------------------
 # Zone helpers
 # ---------------------------------------------------------------------------
 
@@ -209,30 +246,313 @@ def _as_poly(zone_dict: dict, ascii_name: str) -> _ZonePoly | None:
     return _ZonePoly(ascii_name=ascii_name, oz=float(o["z"]), H=float(d["height"]), floor_pts=pts)
 
 
-def _shared_walls(boxes: list[_ZoneBox], tol: float = 0.01) -> list[tuple[str, str]]:
-    """Return list of (wall_A_name, wall_B_name) pairs that share a face (box-only)."""
-    pairs: list[tuple[str, str]] = []
+# ---------------------------------------------------------------------------
+# Rectangle subtraction utilities (axis-aligned)
+# ---------------------------------------------------------------------------
+
+Rect2D = tuple[float, float, float, float]  # (u0, v0, u1, v1)
+
+
+def _rect_subtract(rect: Rect2D, clip: Rect2D, tol: float = 0.01) -> list[Rect2D]:
+    """Subtract *clip* from *rect* (both axis-aligned)."""
+    r0, r1, r2, r3 = rect
+    c0, c1, c2, c3 = clip
+    if c0 >= r2 - tol or c2 <= r0 + tol or c1 >= r3 - tol or c3 <= r1 + tol:
+        return [rect]
+    result: list[Rect2D] = []
+    if c0 > r0 + tol:
+        result.append((r0, r1, c0, r3))
+    if c2 < r2 - tol:
+        result.append((c2, r1, r2, r3))
+    if c1 > r1 + tol:
+        result.append((max(r0, c0), r1, min(r2, c2), c1))
+    if c3 < r3 - tol:
+        result.append((max(r0, c0), c3, min(r2, c2), r3))
+    return [r for r in result if (r[2] - r[0] > tol and r[3] - r[1] > tol)]
+
+
+def _rect_subtract_multi(rect: Rect2D, clips: list[Rect2D], tol: float = 0.01) -> list[Rect2D]:
+    remaining = [rect]
+    for c in clips:
+        nxt: list[Rect2D] = []
+        for r in remaining:
+            nxt.extend(_rect_subtract(r, c, tol))
+        remaining = nxt
+        if not remaining:
+            break
+    return remaining
+
+
+# ---------------------------------------------------------------------------
+# Adjacency detection and split-surface planning (box zones)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _VertPair:
+    lower_idx: int
+    upper_idx: int
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+@dataclass(frozen=True)
+class _HorizPair:
+    zone_a_idx: int
+    dir_a: str
+    zone_b_idx: int
+    dir_b: str
+    p0: float
+    p1: float
+    z0: float
+    z1: float
+
+
+def _detect_vertical_pairs(boxes: list[_ZoneBox], tol: float = 0.01) -> list[_VertPair]:
+    pairs: list[_VertPair] = []
+    for i, a in enumerate(boxes):
+        for j, b in enumerate(boxes):
+            if i == j:
+                continue
+            if abs(b.oz - a.z_max) > tol:
+                continue
+            x0 = max(a.ox, b.ox)
+            y0 = max(a.oy, b.oy)
+            x1 = min(a.x_max, b.x_max)
+            y1 = min(a.y_max, b.y_max)
+            if x1 - x0 > tol and y1 - y0 > tol:
+                pairs.append(_VertPair(i, j, round(x0, 3), round(y0, 3), round(x1, 3), round(y1, 3)))
+    return pairs
+
+
+def _detect_horizontal_pairs(boxes: list[_ZoneBox], tol: float = 0.01) -> list[_HorizPair]:
+    pairs: list[_HorizPair] = []
     n = len(boxes)
-
-    def overlap(a0, a1, b0, b1) -> bool:
-        return (min(a1, b1) - max(a0, b0)) > tol
-
     for i in range(n):
         for j in range(i + 1, n):
             a, b = boxes[i], boxes[j]
-            # A east ↔ B west
-            if abs(a.x_max - b.ox) < tol and overlap(a.oy, a.y_max, b.oy, b.y_max) and overlap(a.oz, a.z_max, b.oz, b.z_max):
-                pairs.append((f"{a.ascii_name}_Wall_East", f"{b.ascii_name}_Wall_West"))
-            # B east ↔ A west
-            elif abs(b.x_max - a.ox) < tol and overlap(a.oy, a.y_max, b.oy, b.y_max) and overlap(a.oz, a.z_max, b.oz, b.z_max):
-                pairs.append((f"{b.ascii_name}_Wall_East", f"{a.ascii_name}_Wall_West"))
-            # A north ↔ B south
-            elif abs(a.y_max - b.oy) < tol and overlap(a.ox, a.x_max, b.ox, b.x_max) and overlap(a.oz, a.z_max, b.oz, b.z_max):
-                pairs.append((f"{a.ascii_name}_Wall_North", f"{b.ascii_name}_Wall_South"))
-            # B north ↔ A south
-            elif abs(b.y_max - a.oy) < tol and overlap(a.ox, a.x_max, b.ox, b.x_max) and overlap(a.oz, a.z_max, b.oz, b.z_max):
-                pairs.append((f"{b.ascii_name}_Wall_North", f"{a.ascii_name}_Wall_South"))
+
+            def _append(ai: int, ad: str, bi: int, bd: str, p0: float, p1: float, z0: float, z1: float) -> None:
+                if p1 - p0 > tol and z1 - z0 > tol:
+                    pairs.append(_HorizPair(ai, ad, bi, bd, round(p0, 3), round(p1, 3), round(z0, 3), round(z1, 3)))
+
+            # East/West contact
+            if abs(a.x_max - b.ox) < tol:
+                _append(i, "East", j, "West", max(a.oy, b.oy), min(a.y_max, b.y_max), max(a.oz, b.oz), min(a.z_max, b.z_max))
+            if abs(b.x_max - a.ox) < tol:
+                _append(j, "East", i, "West", max(a.oy, b.oy), min(a.y_max, b.y_max), max(a.oz, b.oz), min(a.z_max, b.z_max))
+            # North/South contact
+            if abs(a.y_max - b.oy) < tol:
+                _append(i, "North", j, "South", max(a.ox, b.ox), min(a.x_max, b.x_max), max(a.oz, b.oz), min(a.z_max, b.z_max))
+            if abs(b.y_max - a.oy) < tol:
+                _append(j, "North", i, "South", max(a.ox, b.ox), min(a.x_max, b.x_max), max(a.oz, b.oz), min(a.z_max, b.z_max))
     return pairs
+
+
+@dataclass
+class _SurfaceSpec:
+    name: str
+    surface_type: str
+    construction: str
+    zone: str
+    boundary: str
+    boundary_object: str
+    sun: str
+    wind: str
+    pts: list[Vec3]
+    is_wall: bool
+
+
+def _build_split_surfaces(boxes: list[_ZoneBox], tol: float = 0.01) -> list[_SurfaceSpec]:
+    """Compute split surfaces for all box zones.
+
+    Requirement mapping
+    -------------------
+    - Covered portions of a lower zone's top: `Ceiling` + `Surface` boundary.
+    - Uncovered portions of a lower zone's top: `Roof` + `Outdoors`.
+    - Covered portions of an upper zone's bottom: `Floor` + `Surface`.
+    - Uncovered portions of an upper zone's bottom: `Floor` + `Outdoors` (when oz>0).
+    - Partially overlapped wall areas: `Wall` + `Surface` for overlap, `Wall` + `Outdoors` for remainder.
+    """
+    specs: list[_SurfaceSpec] = []
+    vert_pairs = _detect_vertical_pairs(boxes, tol=tol)
+    horiz_pairs = _detect_horizontal_pairs(boxes, tol=tol)
+
+    int_wall = "InteriorWallConstruction"
+    int_ceil = "InteriorCeilingConstruction"
+    ext_wall = "ExteriorWallConstruction"
+    ext_roof = "ExteriorRoofConstruction"
+    floor_con = "FloorConstruction"
+
+    top_clips: dict[int, list[Rect2D]] = {}
+    bottom_clips: dict[int, list[Rect2D]] = {}
+    wall_clips: dict[tuple[int, str], list[Rect2D]] = {}
+
+    # Vertical interior pairs
+    for k, vp in enumerate(vert_pairs):
+        lower = boxes[vp.lower_idx]
+        upper = boxes[vp.upper_idx]
+        rect_xy = (vp.x0, vp.y0, vp.x1, vp.y1)
+        top_clips.setdefault(vp.lower_idx, []).append(rect_xy)
+        bottom_clips.setdefault(vp.upper_idx, []).append(rect_xy)
+
+        ceil_name = f"{lower.ascii_name}_Ceiling_V{k:03d}"
+        floor_name = f"{upper.ascii_name}_Floor_V{k:03d}"
+
+        specs.append(_SurfaceSpec(
+            name=ceil_name,
+            surface_type="Ceiling",
+            construction=int_ceil,
+            zone=lower.ascii_name,
+            boundary="Surface",
+            boundary_object=floor_name,
+            sun="NoSun",
+            wind="NoWind",
+            pts=_sub_top_pts(vp.x0, vp.y0, vp.x1, vp.y1, lower.z_max),
+            is_wall=False,
+        ))
+        specs.append(_SurfaceSpec(
+            name=floor_name,
+            surface_type="Floor",
+            construction=floor_con,
+            zone=upper.ascii_name,
+            boundary="Surface" if upper.oz >= tol else "Ground",
+            boundary_object=ceil_name if upper.oz >= tol else "",
+            sun="NoSun",
+            wind="NoWind",
+            pts=_sub_floor_pts(vp.x0, vp.y0, vp.x1, vp.y1, upper.oz),
+            is_wall=False,
+        ))
+
+    # Horizontal interior wall pairs
+    for k, hp in enumerate(horiz_pairs):
+        za = boxes[hp.zone_a_idx]
+        zb = boxes[hp.zone_b_idx]
+        rect_pz = (hp.p0, hp.z0, hp.p1, hp.z1)
+        wall_clips.setdefault((hp.zone_a_idx, hp.dir_a), []).append(rect_pz)
+        wall_clips.setdefault((hp.zone_b_idx, hp.dir_b), []).append(rect_pz)
+
+        name_a = f"{za.ascii_name}_Wall_{hp.dir_a}_H{k:03d}"
+        name_b = f"{zb.ascii_name}_Wall_{hp.dir_b}_H{k:03d}"
+        fixed_a = _wall_fixed_coord(za, hp.dir_a)
+        fixed_b = _wall_fixed_coord(zb, hp.dir_b)
+
+        specs.append(_SurfaceSpec(
+            name=name_a,
+            surface_type="Wall",
+            construction=int_wall,
+            zone=za.ascii_name,
+            boundary="Surface",
+            boundary_object=name_b,
+            sun="NoSun",
+            wind="NoWind",
+            pts=_sub_wall_pts(hp.dir_a, fixed_a, hp.p0, hp.p1, hp.z0, hp.z1),
+            is_wall=True,
+        ))
+        specs.append(_SurfaceSpec(
+            name=name_b,
+            surface_type="Wall",
+            construction=int_wall,
+            zone=zb.ascii_name,
+            boundary="Surface",
+            boundary_object=name_a,
+            sun="NoSun",
+            wind="NoWind",
+            pts=_sub_wall_pts(hp.dir_b, fixed_b, hp.p0, hp.p1, hp.z0, hp.z1),
+            is_wall=True,
+        ))
+
+    # Exterior remainder per zone
+    for idx, box in enumerate(boxes):
+        zn = box.ascii_name
+        ox, oy, oz = box.ox, box.oy, box.oz
+        L, W, H = box.L, box.W, box.H
+        x0, y0, x1, y1 = ox, oy, box.x_max, box.y_max
+
+        # Bottom floor
+        full = (x0, y0, x1, y1)
+        clips = bottom_clips.get(idx, [])
+        if abs(oz) < tol:
+            if not clips:
+                specs.append(_SurfaceSpec(
+                    name=f"{zn}_Floor",
+                    surface_type="Floor",
+                    construction=floor_con,
+                    zone=zn,
+                    boundary="Ground",
+                    boundary_object="",
+                    sun="NoSun",
+                    wind="NoWind",
+                    pts=_floor_pts(ox, oy, oz, L, W),
+                    is_wall=False,
+                ))
+        else:
+            exposed = _rect_subtract_multi(full, clips, tol=tol)
+            for ri, r in enumerate(exposed):
+                rx0, ry0, rx1, ry1 = r
+                specs.append(_SurfaceSpec(
+                    name=f"{zn}_Floor_E{ri:03d}" if clips else f"{zn}_Floor",
+                    surface_type="Floor",
+                    construction=floor_con,
+                    zone=zn,
+                    boundary="Outdoors",
+                    boundary_object="",
+                    sun="NoSun",
+                    wind="NoWind",
+                    pts=_sub_floor_pts(rx0, ry0, rx1, ry1, oz) if clips else _floor_pts(ox, oy, oz, L, W),
+                    is_wall=False,
+                ))
+
+        # Top roof remainder (covered parts handled by interior ceilings above)
+        clips_top = top_clips.get(idx, [])
+        exposed_top = _rect_subtract_multi(full, clips_top, tol=tol)
+        for ri, r in enumerate(exposed_top):
+            rx0, ry0, rx1, ry1 = r
+            specs.append(_SurfaceSpec(
+                name=f"{zn}_Roof_{ri:03d}" if clips_top else f"{zn}_Roof",
+                surface_type="Roof",
+                construction=ext_roof,
+                zone=zn,
+                boundary="Outdoors",
+                boundary_object="",
+                sun="SunExposed",
+                wind="WindExposed",
+                pts=_sub_top_pts(rx0, ry0, rx1, ry1, box.z_max),
+                is_wall=False,
+            ))
+
+        # Walls
+        wall_defs: list[tuple[str, float, Rect2D]] = [
+            ("South", box.oy, (x0, oz, x1, box.z_max)),
+            ("North", box.y_max, (x0, oz, x1, box.z_max)),
+            ("West", box.ox, (y0, oz, y1, box.z_max)),
+            ("East", box.x_max, (y0, oz, y1, box.z_max)),
+        ]
+        for direction, fixed, full_w in wall_defs:
+            clips_w = wall_clips.get((idx, direction), [])
+            exposed_w = _rect_subtract_multi(full_w, clips_w, tol=tol)
+            for ri, r in enumerate(exposed_w):
+                p0, z0, p1, z1 = r
+                specs.append(_SurfaceSpec(
+                    name=f"{zn}_Wall_{direction}_{ri:03d}" if clips_w else f"{zn}_Wall_{direction}",
+                    surface_type="Wall",
+                    construction=ext_wall,
+                    zone=zn,
+                    boundary="Outdoors",
+                    boundary_object="",
+                    sun="SunExposed",
+                    wind="WindExposed",
+                    pts=_sub_wall_pts(direction, fixed, p0, p1, z0, z1) if clips_w else (
+                        _south_pts(ox, oy, oz, L, H) if direction == "South"
+                        else _north_pts(ox, oy, oz, L, W, H) if direction == "North"
+                        else _west_pts(ox, oy, oz, W, H) if direction == "West"
+                        else _east_pts(ox, oy, oz, L, W, H)
+                    ),
+                    is_wall=True,
+                ))
+
+    return specs
 
 
 # ---------------------------------------------------------------------------
@@ -296,52 +616,6 @@ def _make_schedule_compact(sched: ScheduleDef) -> ScheduleCompact:
         schedule_type_limits_name=sched.type_limits_name,
         data=[ScheduleCompactDataItem(field=entry) for entry in sched.data],
     )
-
-
-def _build_zone_box(idf: IDF, box: _ZoneBox, defaults: ConverterDefaults, shared_wall_names: set[str]) -> None:
-    """Add Zone + surfaces for one rectangular zone."""
-    zn = box.ascii_name
-    ox, oy, oz = box.ox, box.oy, box.oz
-    L, W, H = box.L, box.W, box.H
-
-    idf.add(Zone(name=zn))
-
-    ext_wall = "ExteriorWallConstruction"
-    int_wall = "InteriorWallConstruction"
-    ext_roof = "ExteriorRoofConstruction"
-    floor_con = "FloorConstruction"
-    win_con = defaults.window.construction_name
-    wwr = defaults.window.wwr
-
-    floor_boundary = "Ground" if abs(oz) < 0.01 else "Outdoors"
-    wall_specs = [
-        (f"{zn}_Floor", "Floor", floor_con, floor_boundary, "NoSun", "NoWind", _floor_pts(ox, oy, oz, L, W)),
-        (f"{zn}_Ceiling", "Ceiling", ext_roof, "Outdoors", "SunExposed", "WindExposed", _ceiling_pts(ox, oy, oz, L, W, H)),
-        (f"{zn}_Wall_South", "Wall", ext_wall, "Outdoors", "SunExposed", "WindExposed", _south_pts(ox, oy, oz, L, H)),
-        (f"{zn}_Wall_North", "Wall", ext_wall, "Outdoors", "SunExposed", "WindExposed", _north_pts(ox, oy, oz, L, W, H)),
-        (f"{zn}_Wall_West", "Wall", ext_wall, "Outdoors", "SunExposed", "WindExposed", _west_pts(ox, oy, oz, W, H)),
-        (f"{zn}_Wall_East", "Wall", ext_wall, "Outdoors", "SunExposed", "WindExposed", _east_pts(ox, oy, oz, L, W, H)),
-    ]
-
-    for sname, stype, scon, boundary, sun, wind, pts in wall_specs:
-        is_shared = sname in shared_wall_names
-        idf.add(
-            _make_surface(
-                name=sname,
-                surface_type=stype,
-                construction=int_wall if is_shared else scon,
-                zone=zn,
-                boundary=boundary if not is_shared else "Outdoors",  # patched later
-                sun="NoSun" if is_shared else sun,
-                wind="NoWind" if is_shared else wind,
-                pts=pts,
-            )
-        )
-
-        if stype == "Wall" and (not is_shared) and wwr > 0.0:
-            win_pts = _window_pts(pts, wwr)
-            if win_pts:
-                idf.add(_make_window(name=f"{sname}_Window", construction=win_con, wall_name=sname, pts=win_pts))
 
 
 def _poly_floor(poly: _ZonePoly) -> list[Vec3]:
@@ -426,21 +700,6 @@ def _build_zone_poly(idf: IDF, poly: _ZonePoly, defaults: ConverterDefaults) -> 
                 idf.add(_make_window(name=f"{sname}_Window", construction=win_con, wall_name=sname, pts=win_pts))
 
 
-def _patch_shared_walls(idf: IDF, pairs: list[tuple[str, str]]) -> None:
-    """Set boundary condition on detected interior surface pairs."""
-    for wall_a, wall_b in pairs:
-        sa = idf.get(BuildingSurfaceDetailed, wall_a)
-        sb = idf.get(BuildingSurfaceDetailed, wall_b)
-        if sa is None or sb is None:
-            continue
-        for surf, partner in [(sa, wall_b), (sb, wall_a)]:
-            surf.outside_boundary_condition = "Surface"
-            surf.outside_boundary_condition_object = partner
-            surf.sun_exposure = "NoSun"
-            surf.wind_exposure = "NoWind"
-            surf.construction_name = "InteriorWallConstruction"
-
-
 def _add_zone_loads_and_hvac(idf: IDF, zn: str, defaults: ConverterDefaults) -> None:
     ppl = defaults.people
     idf.add(People(
@@ -520,9 +779,6 @@ def convert_and_run(
             W=float(d["width"]),
             H=float(d["height"]),
         ))
-
-    shared_pairs = _shared_walls(boxes)
-    shared_wall_names: set[str] = {w for pair in shared_pairs for w in pair}
 
     idf = IDF()
 
@@ -627,10 +883,36 @@ def convert_and_run(
     ))
 
     # ── Geometry ──────────────────────────────────────────────────────────
+    # Box zones: add Zone objects first, then split surfaces (ceiling/roof + walls)
     for box in boxes:
-        _build_zone_box(idf, box, defaults, shared_wall_names)
-    _patch_shared_walls(idf, shared_pairs)
+        idf.add(Zone(name=box.ascii_name))
+    if boxes:
+        surface_specs = _build_split_surfaces(boxes)
+        wwr = defaults.window.wwr
+        win_con = defaults.window.construction_name
+        for spec in surface_specs:
+            idf.add(_make_surface(
+                name=spec.name,
+                surface_type=spec.surface_type,
+                construction=spec.construction,
+                zone=spec.zone,
+                boundary=spec.boundary,
+                sun=spec.sun,
+                wind=spec.wind,
+                pts=spec.pts,
+                boundary_object=spec.boundary_object,
+            ))
+            if spec.is_wall and spec.boundary == "Outdoors" and wwr > 0.0:
+                win_pts = _window_pts(spec.pts, wwr)
+                if win_pts:
+                    idf.add(_make_window(
+                        name=f"{spec.name}_Window",
+                        construction=win_con,
+                        wall_name=spec.name,
+                        pts=win_pts,
+                    ))
 
+    # Polygon zones: exterior-only for now (no splitting)
     for poly in polys:
         _build_zone_poly(idf, poly, defaults)
 
@@ -652,7 +934,7 @@ def convert_and_run(
 
     print(
         f"[idf_converter] IDF saved → {idf_path}  "
-        f"({len(raw_zones)} zones: {len(boxes)} box, {len(polys)} polygon; {len(shared_pairs)} shared-wall pairs)"
+        f"({len(raw_zones)} zones: {len(boxes)} box, {len(polys)} polygon)"
     )
 
     if not run_simulation:
