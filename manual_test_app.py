@@ -26,11 +26,13 @@ from scripts.ep_sim_utils import (
 from scripts.generate_20260528 import generate_20260528, gross_area
 from scripts.ga_core_20260528 import (
     CheckpointState,
+    DEFAULT_GENES_20260528,
     GAConfig,
     load_checkpoint,
     run_ga,
     save_checkpoint,
 )
+from scripts.ga_defaults_20260528 import build_ga_fixed_params
 from scripts.facade_params import FACADE_TUNABLE, default_facade_params
 from scripts.llm_optimizer import (
     ALL_TUNABLE,
@@ -577,7 +579,13 @@ with tab_llm:
 
 with tab_ga:
     st.subheader("遗传算法优化（GA）— generate_20260528")
-    st.caption("每次评估需运行完整 EnergyPlus（direct）。")
+    st.caption(
+        "每次评估需运行完整 EnergyPlus（direct）。"
+        "可调基因（统一三栋 aspect/angle/distance）："
+        "`shared_aspect_ratio`、`shared_offset_angle`、`shared_offset_distance`、"
+        "`boundary_shift`、`window_wwr`；"
+        "固定 `shading_depth=1 m`、`platform_edge_walk_distance=10 m`，其余为生成器默认值。"
+    )
 
     cfg_cols = st.columns(5)
     pop_size = cfg_cols[0].number_input("pop_size", value=10, min_value=5, max_value=30, step=1)
@@ -636,9 +644,14 @@ with tab_ga:
         overall_best_model = None
         overall_best_result_dir = None
 
-        fixed_params = dict(current_params)
+        fixed_params = build_ga_fixed_params(current_params)
         fixed_params["_weather_file"] = weather_file
-        for result in run_ga(config, seed=int(seed), fixed_params=fixed_params):
+        for result in run_ga(
+            config,
+            seed=int(seed),
+            fixed_params=fixed_params,
+            genes=DEFAULT_GENES_20260528,
+        ):
             total_evals += len(result.pop_fitness)
             history_run.append({
                 "gen": result.gen,
@@ -727,3 +740,97 @@ with tab_ga:
                 )
             except Exception as e:
                 st.error(f"生成最优模型失败：{e}")
+
+
+# ---------------------------------------------------------------------------
+# Tab 4: GA+LLM hybrid optimization
+# ---------------------------------------------------------------------------
+
+with tab_hybrid:
+    st.subheader("GA+LLM 混合优化")
+    st.caption("结合 GA 搜索与 LLM 范围收缩；结果保存在 `output/ga_llm_hybrid/ui_*`。")
+
+    preset_cols = st.columns(4)
+    hybrid_preset = preset_cols[0].selectbox(
+        "运行预设",
+        ["快速冒烟", "标准", "自定义"],
+        index=0,
+        key="hybrid_preset",
+    )
+    hybrid_seed = int(preset_cols[1].number_input("随机种子", value=42, step=1, key="hybrid_seed"))
+    hybrid_llm = preset_cols[2].checkbox("启用 LLM", value=True, key="hybrid_llm")
+    hybrid_morris = preset_cols[3].checkbox("Morris 初筛", value=False, key="hybrid_morris")
+
+    if hybrid_preset == "快速冒烟":
+        hy_pop, hy_gen, hy_rounds = 2, 1, 1
+        hy_debug, hy_llm, hy_morris = True, False, False
+    elif hybrid_preset == "标准":
+        hy_pop, hy_gen, hy_rounds = 10, 6, 2
+        hy_debug, hy_llm, hy_morris = False, bool(hybrid_llm), bool(hybrid_morris)
+    else:
+        c1, c2, c3 = st.columns(3)
+        hy_pop = int(c1.number_input("population_size", 5, 30, 10, key="hyb_pop"))
+        hy_gen = int(c2.number_input("max_generations", 1, 20, 8, key="hyb_gen"))
+        hy_rounds = int(c3.number_input("max_rounds", 1, 5, 2, key="hyb_rounds"))
+        hy_debug = st.checkbox("debug_mode（缩小规模）", value=False, key="hyb_debug")
+        hy_llm = bool(hybrid_llm)
+        hy_morris = bool(hybrid_morris)
+
+    est_ep = hy_pop * (hy_gen + 1) * hy_rounds
+    st.info(f"预计约 {est_ep} 次 EnergyPlus 评估（Morris/LLM 可能增加额外次数）。")
+
+    btn_cols = st.columns([1, 1, 2])
+    start_hybrid = btn_cols[0].button(
+        "▶ 一键启动 GA+LLM 混合优化",
+        type="primary",
+        use_container_width=True,
+        key="hybrid_start",
+    )
+    if btn_cols[1].button("清除结果", use_container_width=True, key="hybrid_clear"):
+        st.session_state.mt_hybrid_running = False
+        st.session_state.mt_hybrid_report = None
+        st.session_state.mt_hybrid_output_dir = None
+        st.rerun()
+
+    if start_hybrid:
+        st.session_state.mt_hybrid_running = True
+        st.session_state.mt_hybrid_report = None
+        st.rerun()
+
+    if st.session_state.mt_hybrid_running and st.session_state.mt_hybrid_report is None:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        ns = time.time_ns() % 1_000_000_000
+        out_dir = Path(f"output/ga_llm_hybrid/ui_{ts}_{ns:09d}")
+        hybrid_cfg = build_config_from_manual_params(
+            current_params,
+            population_size=hy_pop,
+            max_generations=hy_gen,
+            max_rounds=hy_rounds,
+            debug_mode=hy_debug,
+            llm_enabled=hy_llm,
+            morris_enabled=hy_morris,
+            partition_enabled=bool(partition_enabled),
+            perimeter_depth=float(perimeter_depth),
+            seed=hybrid_seed,
+        )
+        with st.spinner("正在运行 GA+LLM 混合优化（耗时较长）…"):
+            try:
+                orch = HybridOrchestrator(hybrid_cfg, out_dir)
+                report = orch.run()
+                st.session_state.mt_hybrid_report = report
+                st.session_state.mt_hybrid_output_dir = str(out_dir)
+            except Exception as exc:
+                st.error(f"混合优化失败：{exc}")
+            finally:
+                st.session_state.mt_hybrid_running = False
+        st.rerun()
+
+    report = st.session_state.mt_hybrid_report
+    if report:
+        best = report.get("best") or {}
+        st.metric("最优 EUI (MJ/m²)", f"{(best.get('objectives') or {}).get('eui_mj_m2', best.get('fitness', 'N/A'))}")
+        if st.session_state.mt_hybrid_output_dir:
+            st.caption(f"输出目录：`{st.session_state.mt_hybrid_output_dir}`")
+        st.json(report)
+    elif not st.session_state.mt_hybrid_running:
+        st.info("选择预设后点击「一键启动 GA+LLM 混合优化」。")

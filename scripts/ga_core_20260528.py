@@ -29,33 +29,13 @@ class GeneSpec:
     is_int: bool = False
 
 
+# Five genes only; shared_* uniformly controls all three blocks (see generate_20260528).
 DEFAULT_GENES_20260528: list[GeneSpec] = [
-    GeneSpec("total_area", 6000.0, 16000.0, 100.0),
-    GeneSpec("lobby_height", 3.0, 9.0, 0.1),
-    GeneSpec("floor_height", 3.0, 5.0, 0.1),
-    GeneSpec("setback_south", 0.0, 30.0, 0.5),
-    GeneSpec("setback_west", 0.0, 30.0, 0.5),
-    GeneSpec("setback_north", 0.0, 30.0, 0.5),
-    GeneSpec("setback_east", 0.0, 30.0, 0.5),
-    GeneSpec("low_aspect_ratio", 0.5, 2.0, 0.05),
-    GeneSpec("mid_aspect_ratio", 0.5, 2.0, 0.05),
-    GeneSpec("high_aspect_ratio", 0.5, 2.0, 0.05),
+    GeneSpec("shared_aspect_ratio", 0.5, 2.0, 0.05),
+    GeneSpec("shared_offset_angle", 0.0, 360.0, 1.0),
+    GeneSpec("shared_offset_distance", 0.0, 10.0, 0.1),
     GeneSpec("boundary_shift", 0.0, 200.0, 1.0),
-    GeneSpec("group_size", 1, 4, 1, is_int=True),
-    GeneSpec("low_offset_angle", 0.0, 360.0, 1.0),
-    GeneSpec("mid_offset_angle", 0.0, 360.0, 1.0),
-    GeneSpec("high_offset_angle", 0.0, 360.0, 1.0),
-    GeneSpec("low_offset_distance", 0.0, 10.0, 0.1),
-    GeneSpec("mid_offset_distance", 0.0, 10.0, 0.1),
-    GeneSpec("high_offset_distance", 0.0, 10.0, 0.1),
-    GeneSpec("min_support_overlap_ratio", 0.1, 1.0, 0.05),
-    GeneSpec("platform_edge_walk_distance", 1.0, 12.0, 0.5),
-    GeneSpec("add_aerial_platforms", 0, 1, 1, is_int=True),  # bool encoded as 0/1
     GeneSpec("window_wwr", 0.0, 0.8, 0.05),
-    GeneSpec("window_module", 0.5, 3.0, 0.1),
-    GeneSpec("shading_depth", 0.0, 2.0, 0.05),
-    GeneSpec("window_enabled", 0, 1, 1, is_int=True),
-    GeneSpec("shading_enabled", 0, 1, 1, is_int=True),
 ]
 
 
@@ -195,6 +175,23 @@ def tournament_select(population: list[dict], fitness: list[float], k: int) -> d
     return dict(population[best])
 
 
+def _prepare_geo_params(merged: dict) -> dict:
+    """Merge fixed + individual and enforce unified shared building controls."""
+    from scripts.facade_params import decode_generator_bools
+
+    geo = {k: v for k, v in merged.items() if not str(k).startswith("_")}
+    if geo.get("shared_aspect_ratio") is not None:
+        for key in ("low_aspect_ratio", "mid_aspect_ratio", "high_aspect_ratio"):
+            geo.pop(key, None)
+    if geo.get("shared_offset_angle") is not None:
+        for key in ("low_offset_angle", "mid_offset_angle", "high_offset_angle"):
+            geo.pop(key, None)
+    if geo.get("shared_offset_distance") is not None:
+        for key in ("low_offset_distance", "mid_offset_distance", "high_offset_distance"):
+            geo.pop(key, None)
+    return decode_generator_bools(geo)
+
+
 def evaluate_fitness(
     individual: dict,
     cache: dict[str, float],
@@ -205,12 +202,7 @@ def evaluate_fitness(
     use_cache: bool,
 ) -> tuple[float, dict | None, str | None]:
     """Return (EUI, model_dict, result_dir). model_dict is None if evaluation failed."""
-    full_params = {**fixed_params, **individual}
-    # Remove GA-internal keys before calling the generator.
-    geo_params = {k: v for k, v in full_params.items() if not str(k).startswith("_")}
-    from scripts.facade_params import decode_generator_bools
-
-    geo_params = decode_generator_bools(geo_params)
+    geo_params = _prepare_geo_params({**fixed_params, **individual})
 
     key = _params_hash(geo_params)
     if use_cache and key in cache:
@@ -312,6 +304,7 @@ def run_ga(
         "seed": int(seed) if seed is not None else None,
         "batch_size": int(config.pop_size),
         "gene_count": len(genes),
+        "gene_names": [g.name for g in genes],
         "use_cache": bool(config.use_cache),
         "expected_evaluations": int(config.pop_size) * (int(config.n_gen) + 1),
         "partition_enabled": bool(config.partition_enabled),
@@ -344,7 +337,8 @@ def run_ga(
     # Always keep a baseline model for UI display/debugging, even if all individuals
     # are penalized. This mirrors the user's current sidebar parameters.
     try:
-        baseline_geo = {k: v for k, v in fixed_params.items() if not str(k).startswith("_")}
+        baseline_ind = baseline_individual_from_fixed(fixed_params, genes)
+        baseline_geo = _prepare_geo_params({**fixed_params, **baseline_ind})
         raw = generate_20260528(**baseline_geo)
         if fixed_params.get("_partition_enabled", True):
             raw = partition_model_by_floor(
