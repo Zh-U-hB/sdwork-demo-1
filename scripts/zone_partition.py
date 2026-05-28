@@ -552,13 +552,25 @@ def partition_model_by_floor(
 
     for plate in plates:
         parts = classify_plate(plate, plates, perimeter_depth)
+        seen_rect_keys: set[tuple[float, float, float, float, float, float, str]] = set()
         for index, part in enumerate(parts, start=1):
             partition_counts[part.category] = partition_counts.get(part.category, 0) + 1
             exposure_tag = "_".join(part.exposure) if part.exposure else "core"
-            add_polygon_zone(
+            # The EnergyPlus converter currently supports adjacency splitting only for
+            # axis-aligned rectangles (box zones). To keep the partition workflow
+            # simulation-ready, we approximate any polygon part by its bounding
+            # rectangle and dedupe identical rectangles (can happen for corner splits).
+            xs = [p[0] for p in part.polygon]
+            ys = [p[1] for p in part.polygon]
+            rect = Rect(min(xs), min(ys), max(xs), max(ys))
+            key = (round3(rect.x0), round3(rect.y0), round3(rect.x1), round3(rect.y1), round3(plate.z), round3(plate.height), part.category)
+            if key in seen_rect_keys:
+                continue
+            seen_rect_keys.add(key)
+            add_rect_zone(
                 out_zones,
                 f"{plate.name}_{part.category}_{exposure_tag}_{index:02d}",
-                part.polygon,
+                rect,
                 plate.z,
                 plate.height,
                 category=part.category,
@@ -568,6 +580,7 @@ def partition_model_by_floor(
                     "partition_type": part.category,
                     "exposure": list(part.exposure),
                     "perimeter_depth": perimeter_depth,
+                    "geometry_note": "polygon_part_approximated_to_rect_bbox",
                 },
             )
 

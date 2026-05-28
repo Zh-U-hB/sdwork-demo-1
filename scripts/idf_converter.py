@@ -69,8 +69,16 @@ def _ascii_name(name: str, index: int, prefix: str = "Zone") -> str:
     """Return a short ASCII-safe IDF name for *name*."""
     if _NON_ASCII.search(name):
         return f"{prefix}_{index:02d}"
-    safe = _UNSAFE.sub("_", name)[:48]
-    return safe or f"{prefix}_{index:02d}"
+    # EnergyPlus object names must be unique. Many long names can collide after truncation,
+    # especially for partitioned zones. Always append an index suffix and truncate the base
+    # to keep the total length stable.
+    suffix = f"_{index:03d}"
+    max_len = 48
+    base_len = max(1, max_len - len(suffix))
+    safe = _UNSAFE.sub("_", name)
+    safe = safe[:base_len]
+    safe = safe.rstrip("_")
+    return (safe or prefix) + suffix
 
 
 # ---------------------------------------------------------------------------

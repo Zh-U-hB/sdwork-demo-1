@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from scripts.zone_partition import partition_model_by_floor
 # ---------------------------------------------------------------------------
 # Tunable-parameter specs per generator
 # ---------------------------------------------------------------------------
@@ -389,6 +390,8 @@ def run_llm_optimization(
     max_iterations: int = 5,
     convergence_threshold: float = 2.0,
     initial_ep_overrides: dict | None = None,
+    partition_enabled: bool = True,
+    perimeter_depth: float = 4.0,
     output_base: str = "output/llm_opt",
     llm=None,
     progress_callback: Callable[[IterationRecord], None] | None = None,
@@ -447,6 +450,8 @@ def run_llm_optimization(
         "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "max_iterations": int(max_iterations),
         "convergence_threshold": float(convergence_threshold),
+        "partition_enabled": bool(partition_enabled),
+        "perimeter_depth": float(perimeter_depth),
         "initial_params": dict(initial_params),
         "initial_ep_overrides": dict(initial_ep_overrides or {}),
         "tunable_keys": sorted(list((tunable_spec or ALL_TUNABLE).keys())),
@@ -457,7 +462,7 @@ def run_llm_optimization(
     for i in range(max_iterations):
         # --- Generate model and run simulation ---
         try:
-            model = generator_fn(**params)
+            raw_model = generator_fn(**params)
         except ValueError as exc:
             record = IterationRecord(
                 iteration=i, params=dict(params), ep_defaults_overrides=dict(ep_overrides),
@@ -469,6 +474,16 @@ def run_llm_optimization(
             if progress_callback:
                 progress_callback(record)
             break
+
+        # Partition first (simulation uses partitioned zones)
+        model = raw_model
+        if partition_enabled:
+            model = partition_model_by_floor(
+                raw_model,
+                perimeter_depth=float(perimeter_depth),
+                lobby_height=float(params.get("lobby_height", 6.0)),
+                floor_height=float(params.get("floor_height", 4.0)),
+            )
 
         ep_defaults = _apply_ep_overrides(ep_overrides)
 

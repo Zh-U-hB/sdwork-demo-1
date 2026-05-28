@@ -17,6 +17,7 @@ from typing import Generator
 
 from scripts.ep_sim_utils import read_eplustbl, run_ep_simulation_direct as run_ep_simulation
 from scripts.generate_20260528 import generate_20260528
+from scripts.zone_partition import partition_model_by_floor
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,9 @@ class GAConfig:
     run_dir: str | None = None
     run_root: str = "output/ga_runs"
     use_cache: bool = True  # if False: run every evaluation (no dedupe)
+    # Partition settings (applied before JSON->IDF conversion)
+    partition_enabled: bool = True
+    perimeter_depth: float = 4.0
 
 
 def _ensure_run_dir(config: GAConfig) -> Path:
@@ -184,10 +188,23 @@ def evaluate_fitness(
         return cache[key], None
 
     try:
-        model = generate_20260528(**full_params)
+        raw_model = generate_20260528(**full_params)
     except Exception:
         cache[key] = PENALTY
         return PENALTY, None
+
+    model = raw_model
+    if fixed_params.get("_partition_enabled", True):
+        try:
+            model = partition_model_by_floor(
+                raw_model,
+                perimeter_depth=float(fixed_params.get("_perimeter_depth", 4.0)),
+                lobby_height=float(full_params.get("lobby_height", 6.0)),
+                floor_height=float(full_params.get("floor_height", 4.0)),
+            )
+        except Exception:
+            cache[key] = PENALTY
+            return PENALTY, raw_model
 
     try:
         eval_id = eval_subdir
@@ -262,6 +279,8 @@ def run_ga(
         "gene_count": len(genes),
         "use_cache": bool(config.use_cache),
         "expected_evaluations": int(config.pop_size) * (int(config.n_gen) + 1),
+        "partition_enabled": bool(config.partition_enabled),
+        "perimeter_depth": float(config.perimeter_depth),
     }
     (run_dir / "run_meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
 
@@ -272,6 +291,11 @@ def run_ga(
         config.checkpoint_path = str(run_dir / "checkpoint.json")
 
     cache = _load_cache(config.cache_path) if config.use_cache else {}
+
+    # Inject partition settings into the fixed params passed into evaluation.
+    fixed_params = dict(fixed_params)
+    fixed_params["_partition_enabled"] = bool(config.partition_enabled)
+    fixed_params["_perimeter_depth"] = float(config.perimeter_depth)
 
     population = [random_individual(genes) for _ in range(config.pop_size)]
     fitness = [PENALTY] * config.pop_size

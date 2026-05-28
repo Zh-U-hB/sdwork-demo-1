@@ -30,6 +30,7 @@ from scripts.llm_optimizer import (
     best_record,
     run_llm_optimization,
 )
+from scripts.zone_partition import partition_model_by_floor
 from scripts.vis_utils import (
     model_metrics,
     render_end_use_chart,
@@ -131,6 +132,11 @@ with st.sidebar:
     platform_edge_walk_distance = st.slider("platform_edge_walk_distance", 1.0, 12.0, 5.0, 0.5)
     add_open_space_markers = st.checkbox("add_open_space_markers", value=True)
 
+    st.divider()
+    st.subheader("分区（Partition）")
+    partition_enabled = st.checkbox("启用分区后再模拟（推荐）", value=True)
+    perimeter_depth = st.slider("perimeter_depth (m)", 1.0, 8.0, 4.0, 0.5)
+
 
 def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> tuple[str | None, dict]:
     """Render simulation runner + charts. Returns (result_dir, sim_data)."""
@@ -140,7 +146,15 @@ def _render_sim_section(model: dict, building_name: str, *, key_prefix: str) -> 
         st.caption("走 direct 路径：JSON → IDF → EnergyPlus（无 MCP/LLM）。")
         if st.button("▶ 运行 EnergyPlus（Direct）", type="primary", use_container_width=True, key=f"{key_prefix}_run_ep"):
             with st.spinner("正在运行 EnergyPlus…"):
-                result_dir = run_ep_simulation_direct(model, building_name=building_name)
+                sim_model = model
+                if partition_enabled:
+                    sim_model = partition_model_by_floor(
+                        model,
+                        perimeter_depth=float(perimeter_depth),
+                        lobby_height=float(current_params.get("lobby_height", 6.0)),
+                        floor_height=float(current_params.get("floor_height", 4.0)),
+                    )
+                result_dir = run_ep_simulation_direct(sim_model, building_name=building_name)
             if result_dir:
                 st.session_state.mt_last_result_dir = result_dir
                 st.success(f"完成：{result_dir}")
@@ -254,6 +268,20 @@ current_params = dict(
 current_model = generate_20260528(**current_params)
 current_metrics = model_metrics(current_model, gross_area_fn=gross_area)
 
+# For frontend visualization: optionally display the partitioned model
+display_model = current_model
+if partition_enabled:
+    try:
+        display_model = partition_model_by_floor(
+            current_model,
+            perimeter_depth=float(perimeter_depth),
+            lobby_height=float(current_params.get("lobby_height", 6.0)),
+            floor_height=float(current_params.get("floor_height", 4.0)),
+        )
+    except Exception as e:
+        st.warning(f"分区失败，已回退到原始模型显示：{e}")
+        display_model = current_model
+
 
 # ---------------------------------------------------------------------------
 # Main area: always show 3D model
@@ -264,7 +292,7 @@ st.caption(
     f"zones={current_metrics['zone_count']}（mass={current_metrics['mass_zone_count']}）"
 )
 st.plotly_chart(
-    render_model(current_model, site_size, show_edges, opacity),
+    render_model(display_model, site_size, show_edges, opacity),
     use_container_width=True,
     key="mt_main_model_3d",
 )
@@ -272,12 +300,12 @@ st.plotly_chart(
 col_exp, col_params = st.columns([1, 1])
 with col_exp:
     if st.button("保存 JSON", use_container_width=True, key="mt_save_main"):
-        path = save_json(current_model, output_path)
+        path = save_json(display_model, output_path)
         st.success(f"已保存到 {path}")
 with col_params:
     st.download_button(
         "下载 JSON",
-        data=json.dumps(current_model, indent=2, ensure_ascii=False),
+        data=json.dumps(display_model, indent=2, ensure_ascii=False),
         file_name=Path(output_path).name or "model.json",
         mime="application/json",
         use_container_width=True,
@@ -294,6 +322,7 @@ st.divider()
 tab_sim, tab_llm, tab_ga = st.tabs(["模拟与结果", "LLM 优化", "遗传算法优化 (GA)"])
 
 with tab_sim:
+    # simulation runner will re-apply partition when enabled; keep input as raw model
     _render_sim_section(current_model, current_params["building_name"], key_prefix="mt_current")
 
 
@@ -347,6 +376,8 @@ with tab_llm:
                     tunable_spec=tunable,
                     max_iterations=int(llm_max_iter),
                     convergence_threshold=float(llm_conv_thr),
+                    partition_enabled=bool(partition_enabled),
+                    perimeter_depth=float(perimeter_depth),
                 )
             st.success("LLM 优化完成。")
             st.rerun()
@@ -375,7 +406,15 @@ with tab_llm:
         # Show best model with energy
         st.subheader("最优方案 3D 分区能耗")
         try:
-            model = generate_20260528(**best.params)
+            raw_model = generate_20260528(**best.params)
+            model = raw_model
+            if partition_enabled:
+                model = partition_model_by_floor(
+                    raw_model,
+                    perimeter_depth=float(perimeter_depth),
+                    lobby_height=float(best.params.get("lobby_height", 6.0)),
+                    floor_height=float(best.params.get("floor_height", 4.0)),
+                )
             sim_data = read_eplustbl(best.result_dir) if best.result_dir else {"exists": False}
             mapped = model_energy_map(model, sim_data) if sim_data.get("exists") else {}
             st.plotly_chart(
@@ -472,6 +511,8 @@ with tab_ga:
             elite_count=int(elite_count),
             run_dir=run_dir,
             use_cache=False,  # 不去重：每次评估都跑模拟并落盘一个目录
+            partition_enabled=bool(partition_enabled),
+            perimeter_depth=float(perimeter_depth),
         )
 
         progress = st.progress(0.0, text="准备开始 GA…")
